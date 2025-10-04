@@ -1,7 +1,7 @@
 # GPT-5 ASCIIVision 📺
 
 > Play MP4 videos as ASCII art directly in your terminal with retro CRT-style effects!
-<img width="492" height="520" alt="Screenshot 2025-08-15 at 10 37 35 PM" src="https://github.com/user-attachments/assets/f9f6a5fd-7b77-46b5-bfa0-7bd76cf7fb8f" />
+<img width="629" height="401" alt="Screenshot 2025-10-03 at 7 24 29 PM" src="https://github.com/user-attachments/assets/81b80b21-5abb-4aae-a453-05578c8f1761" />
 
 ## ✨ Features
 
