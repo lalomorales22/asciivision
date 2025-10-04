@@ -1,0 +1,32 @@
+[package]
+name = "mega-analytics"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mega-analytics"
+path = "src/main.rs"
+
+[dependencies]
+# Terminal UI
+ratatui = { version = "0.29", features = ["crossterm"] }
+crossterm = "0.28"
+tachyonfx = "0.16"
+
+# Video playback
+ffmpeg-next = "8.0"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Error handling
+anyhow = "1"
+
+# Time handling
+chrono = "0.4"
+
+# File watching
+notify = "7.0"
+
+# Utilities
+crossbeam-channel = "0.5"

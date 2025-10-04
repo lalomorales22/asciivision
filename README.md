@@ -1,9 +1,27 @@
-# GPT-5 ASCIIVision 📺
+# ASCIIVision Ecosystem 🚀
 
-> Play MP4 videos as ASCII art directly in your terminal with retro CRT-style effects!
-<img width="629" height="401" alt="Screenshot 2025-10-03 at 7 24 29 PM" src="https://github.com/user-attachments/assets/81b80b21-5abb-4aae-a453-05578c8f1761" />
+> A complete terminal-based multimedia suite featuring ASCII video playback, multi-AI chat interface, and conversation analytics!
 
-## ✨ Features
+<img width="629" height="401" alt="Screenshot 2025-10-03 at 7 24 29 PM" src="https://github.com/user-attachments/assets/81b80b21-5abb-4aae-a453-05578c8f1761" />
+
+## 📦 Projects
+
+This repository contains three powerful terminal applications:
+
+### 1. 📺 ASCIIVision - Terminal Video Player
+Play MP4 videos as ASCII art directly in your terminal with retro CRT-style effects!
+
+### 2. 🤖 MEGA-CLI - Multi-AI Chat Interface
+Chat with all 4 major AI providers (Claude, Grok, GPT, Gemini) in a beautiful terminal interface with seamless provider switching.
+
+### 3. 📊 MEGA-Analytics - Conversation Dashboard
+Real-time analytics dashboard for tracking and viewing your AI conversations across all providers.
+
+---
+
+## 📺 ASCIIVision - Terminal Video Player
+
+### ✨ Features
 
 - **🎬 Video Playback**: Converts MP4 videos to real-time ASCII art using FFmpeg
 - **🌈 Color Support**: Full RGB color support with automatic ASCII character mapping based on luminance
@@ -16,42 +34,41 @@
 - **🎛️ Interactive Controls**: Pause, color/mono toggle, and glitch effects control
 - **🚀 High Performance**: Multi-threaded decoding with frame buffering
 
-## 🚀 Installation
+### 🚀 Installation
 
-### Prerequisites
+#### Prerequisites
 
 - **Rust** (latest stable version)
 - **FFmpeg** development libraries installed on your system
 
-#### Installing FFmpeg (macOS)
+##### Installing FFmpeg (macOS)
 ```bash
 brew install ffmpeg
 ```
 
-#### Installing FFmpeg (Ubuntu/Debian)
+##### Installing FFmpeg (Ubuntu/Debian)
 ```bash
 sudo apt update
 sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev pkg-config
 ```
 
-### Build from Source
+#### Build from Source
 
 ```bash
-git clone <your-repo-url>
-cd asciivision-game
+cd asciivision
 cargo build --release
 ```
 
 The compiled binary will be available at `target/release/gpt5-asciivision`.
 
-## 🎮 Usage
+### 🎮 Usage
 
-### Basic Usage
+#### Basic Usage
 ```bash
 ./target/release/gpt5-asciivision video.mp4
 ```
 
-### Advanced Options
+#### Advanced Options
 ```bash
 ./target/release/gpt5-asciivision [OPTIONS] <INPUT>
 
@@ -65,20 +82,7 @@ Options:
   -h, --help                   Print help
 ```
 
-### Examples
-
-```bash
-# Play video at default settings
-./target/release/gpt5-asciivision demo.mp4
-
-# Play with custom width and FPS limit
-./target/release/gpt5-asciivision --max-width 100 --fps-cap 24 demo.mp4
-
-# Play in monochrome mode
-./target/release/gpt5-asciivision --mono demo.mp4
-```
-
-## 🎛️ Controls
+### 🎛️ Controls
 
 | Key | Action |
 |-----|--------|
@@ -87,32 +91,187 @@ Options:
 | `C` | Toggle between color and monochrome |
 | `G` | Toggle glitch effects |
 
+---
+
+## 🤖 MEGA-CLI - Multi-AI Chat Interface
+
+### ✨ Features
+
+- **🔄 Multi-AI Support**: Seamlessly switch between Claude Sonnet 4.5, Grok 4, GPT-5, and Gemini 2.5 Pro
+- **⚡ Real-time Streaming**: Fast responses with async API calls
+- **🎨 Beautiful UI**: Color-coded interfaces for each AI provider
+- **💾 Conversation History**: Automatic saving to SQLite database
+- **🎬 Cinematic Loading**: Optional video loading animation
+- **🔧 Smart Switching**: Press F2 to cycle through AI providers without losing context
+- **📊 Database Integration**: All conversations automatically saved for analytics
+
+### 🚀 Installation
+
+#### Prerequisites
+
+- **Rust** (latest stable version)
+- **FFmpeg** (for loading animation)
+- **API Keys** for AI providers you want to use:
+  - `CLAUDE_API_KEY` - Anthropic API key
+  - `GROK_API_KEY` - xAI API key
+  - `OPENAI_API_KEY` - OpenAI API key
+  - `GEMINI_API_KEY` - Google AI API key
+
+#### Setup
+
+1. Create a `.env` file in the `mega-cli` directory:
+```bash
+cd mega-cli
+cat > .env << EOF
+CLAUDE_API_KEY=your_claude_key_here
+GROK_API_KEY=your_grok_key_here
+OPENAI_API_KEY=your_openai_key_here
+GEMINI_API_KEY=your_gemini_key_here
+EOF
+```
+
+2. Build the project:
+```bash
+cargo build --release
+```
+
+### 🎮 Usage
+
+```bash
+# Start with default provider (Claude)
+./target/release/mega-cli
+
+# Skip loading video
+./target/release/mega-cli --skip-loading
+
+# Start with a specific provider
+./target/release/mega-cli --provider grok
+```
+
+### 🎛️ Controls
+
+| Key | Action |
+|-----|--------|
+| `F1` | Toggle help screen |
+| `F2` | Switch AI provider (Claude → Grok → GPT → Gemini) |
+| `Ctrl+L` | Clear current conversation |
+| `Ctrl+C` | Exit application |
+| `Enter` | Send message |
+| `↑/↓` | Scroll through messages |
+| `PgUp/PgDn` | Scroll 10 messages at a time |
+
+### 🎨 AI Providers
+
+- **Claude Sonnet 4.5** - Copper theme
+- **Grok 4** - Cyan theme
+- **GPT-5** - Teal theme
+- **Gemini 2.5 Pro** - Blue theme
+
+---
+
+## 📊 MEGA-Analytics - Conversation Dashboard
+
+### ✨ Features
+
+- **📈 Real-time Updates**: Automatically refreshes when new conversations are saved
+- **🔄 Multi-Provider Views**: Switch between Claude, Grok, GPT, and Gemini analytics
+- **📊 Statistics Dashboard**: View message counts, timestamps, and conversation metrics
+- **💬 Full Message History**: Browse complete conversation logs with timestamps
+- **🎬 Cinematic Loading**: Optional video loading animation
+- **⚡ Live Monitoring**: File-watching system detects database changes instantly
+
+### 🚀 Installation
+
+#### Prerequisites
+
+- **Rust** (latest stable version)
+- **FFmpeg** (for loading animation)
+- **MEGA-CLI** must be used first to create the conversation database
+
+#### Build
+
+```bash
+cd mega-analytics
+cargo build --release
+```
+
+### 🎮 Usage
+
+```bash
+# Start the analytics dashboard
+./target/release/mega-analytics
+```
+
+The dashboard will automatically connect to `~/.config/mega-cli/conversations.db` and display your conversation history.
+
+### 🎛️ Controls
+
+| Key | Action |
+|-----|--------|
+| `←/→` | Switch between AI providers |
+| `1-4` | Quick switch to specific provider (1=Claude, 2=Grok, 3=GPT, 4=Gemini) |
+| `Tab` | Toggle between Statistics and Messages view |
+| `↑/↓` | Scroll through messages |
+| `PgUp/PgDn` | Scroll 10 messages at a time |
+| `Home/End` | Jump to start/end of conversation |
+| `Q` or `Esc` | Exit |
+| `Ctrl+C` | Force quit |
+
+### 📊 Views
+
+#### Statistics View
+- Total message count
+- User messages vs AI responses
+- First and last message timestamps
+- Per-provider conversation metrics
+
+#### Messages View
+- Complete conversation history
+- Color-coded by role (User/Assistant)
+- Timestamps for each message
+- Scrollable with visual scrollbar
+
+---
+
 ## 🛠️ Technical Details
 
-### Architecture
+### Shared Architecture
 
-- **Multi-threaded Design**: Separate decode thread prevents UI blocking
-- **FFmpeg Integration**: Uses `ffmpeg-next` for robust video decoding
-- **Smart Scaling**: Bilinear scaling with terminal cell aspect ratio compensation
-- **ASCII Mapping**: Luminance-based character selection using a 64-character palette
+All three applications are built with:
+- **Rust**: Safe, fast, and concurrent
+- **Ratatui**: Terminal UI framework
+- **TachyonFX**: Visual effects system
+- **Crossterm**: Cross-platform terminal manipulation
+- **FFmpeg**: Video decoding (ASCIIVision & loading screens)
 
-### ASCII Palette
-The app uses a carefully crafted 64-character palette optimized for luminance progression:
+### Database Schema
+
+MEGA-CLI and MEGA-Analytics share a SQLite database at `~/.config/mega-cli/conversations.db`:
+
+```sql
+-- Separate tables for each provider
+CREATE TABLE claude_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+
+CREATE TABLE grok_messages (...);
+CREATE TABLE gpt_messages (...);
+CREATE TABLE gemini_messages (...);
 ```
- .'`^",:;Il!i><~+_-?][}{1)(|\tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$
-```
 
-### Performance
+---
 
-- **Frame Buffering**: 8-frame buffer prevents stutter
-- **Optimized Rendering**: Direct terminal buffer manipulation for smooth playback
-- **Memory Efficient**: Streaming decode with minimal memory footprint
+## 📋 System Requirements
 
-## 📋 Requirements
+- **Operating System**: macOS, Linux, or Windows
+- **Terminal**: Any modern terminal with RGB color support
+- **Rust**: 1.70 or later
+- **FFmpeg**: 4.0 or later (for video features)
 
-- **Terminal**: Any terminal with RGB color support (most modern terminals)
-- **Video Formats**: Any format supported by your system's FFmpeg installation
-- **Minimum Terminal Size**: Recommended 80x24 or larger for best experience
+---
 
 ## 🐛 Troubleshooting
 
@@ -121,25 +280,92 @@ If you get FFmpeg-related errors:
 1. Ensure FFmpeg development libraries are installed
 2. Try re-encoding your video: `ffmpeg -i input.mp4 -c:v libx264 output.mp4`
 
-### Performance Issues
-- Try reducing `--max-width` for better performance on slower systems
-- Use `--fps-cap` to limit framerate if needed
-- Ensure your terminal supports hardware acceleration
+### API Key Issues (MEGA-CLI)
+- Ensure your `.env` file is in the `mega-cli` directory
+- Check that API keys are valid and have proper permissions
+- Keys are loaded when the application starts
 
-### Display Issues
-- Some terminals may not display all characters correctly
-- Try different terminal emulators if characters appear garbled
-- Ensure your terminal font supports the full ASCII range
+### Database Issues (MEGA-Analytics)
+- Make sure you've used MEGA-CLI at least once to create the database
+- Check that `~/.config/mega-cli/conversations.db` exists
+- Database is created automatically on first MEGA-CLI run
 
-## 🏗️ Dependencies
+---
 
-- **anyhow**: Error handling
-- **clap**: Command-line argument parsing
-- **crossterm**: Cross-platform terminal manipulation
-- **ratatui**: Terminal UI framework
-- **tachyonfx**: Visual effects system
-- **ffmpeg-next**: FFmpeg bindings for Rust
-- **crossbeam-channel**: Thread-safe communication
+## 🏗️ Project Structure
+
+```
+asciivision/
+├── README.md                 # This file
+├── asciivision/             # Video player
+│   ├── src/
+│   │   ├── main.rs
+│   │   └── video.rs
+│   └── Cargo.toml
+├── mega-cli/                # Multi-AI chat interface
+│   ├── src/
+│   │   ├── main.rs
+│   │   ├── chat.rs
+│   │   ├── ai.rs
+│   │   ├── db.rs
+│   │   └── video.rs
+│   ├── .env                 # API keys (create this)
+│   └── Cargo.toml
+└── mega-analytics/          # Analytics dashboard
+    ├── src/
+    │   ├── main.rs
+    │   └── video.rs
+    └── Cargo.toml
+```
+
+---
+
+## 🎯 Getting Started
+
+1. **Clone the repository**
+   ```bash
+   git clone <your-repo-url>
+   cd asciivision
+   ```
+
+2. **Install FFmpeg**
+   ```bash
+   # macOS
+   brew install ffmpeg
+
+   # Ubuntu/Debian
+   sudo apt install ffmpeg libavformat-dev libavcodec-dev libswscale-dev libavutil-dev
+   ```
+
+3. **Set up MEGA-CLI** (optional, for AI chat)
+   ```bash
+   cd mega-cli
+   # Create .env with your API keys
+   echo "CLAUDE_API_KEY=your_key" > .env
+   cargo build --release
+   ```
+
+4. **Build all projects**
+   ```bash
+   # From the asciivision root directory
+   cd asciivision && cargo build --release && cd ..
+   cd mega-cli && cargo build --release && cd ..
+   cd mega-analytics && cargo build --release && cd ..
+   ```
+
+5. **Run the apps**
+   ```bash
+   # Video player
+   ./asciivision/target/release/gpt5-asciivision video.mp4
+
+   # AI chat
+   ./mega-cli/target/release/mega-cli
+
+   # Analytics (run after using mega-cli)
+   ./mega-analytics/target/release/mega-analytics
+   ```
+
+---
 
 ## 📝 License
 
@@ -149,15 +375,6 @@ If you get FFmpeg-related errors:
 
 Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
 
-## 🎯 Future Enhancements
-
-- [ ] Audio playback support
-- [ ] Subtitle overlay
-- [ ] More visual effects
-- [ ] Playlist support
-- [ ] Network streaming
-- [ ] Custom ASCII palettes
-
 ---
 
-*Enjoy watching your videos in glorious ASCII art! 🎬*
+*Experience the future of terminal computing! 🚀*
