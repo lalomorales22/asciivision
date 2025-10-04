@@ -1,8 +1,8 @@
 # ASCIIVision Ecosystem 🚀
 
 > A complete terminal-based multimedia suite featuring ASCII video playback, multi-AI chat interface, and conversation analytics!
+<img width="1870" height="423" alt="Screenshot 2025-10-04 at 12 18 50 AM" src="https://github.com/user-attachments/assets/3fdc60cb-0436-43a7-ab80-68468b29c10b" />
 
-<img width="629" height="401" alt="Screenshot 2025-10-03 at 7 24 29 PM" src="https://github.com/user-attachments/assets/81b80b21-5abb-4aae-a453-05578c8f1761" />
 
 ## 📦 Projects
 
