@@ -9,5 +9,5 @@ clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.28"
 ratatui = { version = "0.29", features = ["crossterm"] }
 tachyonfx = "0.16"
-ffmpeg-next = "7.1"
+ffmpeg-next = "8.0"
 crossbeam-channel = "0.5"

@@ -1,0 +1,9 @@
+#!/bin/bash
+
+# Set FFmpeg library paths for compilation
+export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
+export LIBCLANG_PATH=$(brew --prefix llvm)/lib
+export CPATH=/opt/homebrew/include
+
+# Build and run the application
+cargo build --release && cargo run --release "$@"

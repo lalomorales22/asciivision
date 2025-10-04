@@ -210,9 +210,7 @@ fn main() -> Result<()> {
     let drift = fx::hsl_shift(Some([0.0, 0.0, 0.05]), None, (6_000, Interpolation::SineInOut));
     // Glitch effect - commented out as the function is not public
     // let glitch = fx::glitch_fx(0.02, 0.06, (1200, Interpolation::Linear));
-    // Term256 colors effect (deprecated but still functional)
-    let pal = fx::term256_colors();
-    effects.add_effect(fx::parallel(&[boot, drift, pal]));
+    effects.add_effect(fx::parallel(&[boot, drift]));
 
     // calc playable area + spawn decode at that resolution
     let area0 = term.get_frame().area();
