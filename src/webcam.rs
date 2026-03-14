@@ -158,19 +158,42 @@ fn capture_loop(config: &WebcamConfig, tx: &Sender<AsciiFrame>, active: &Arc<Ato
         .context("decoder context")?;
     let mut decoder = dec_ctx.decoder().video().context("video decoder")?;
 
+    // Compute output dimensions that preserve the webcam's native aspect ratio
+    // accounting for terminal cells being ~2x taller than wide.
+    let src_w = decoder.width() as f32;
+    let src_h = decoder.height() as f32;
+    let src_aspect = src_w / src_h;
+    // Terminal cell aspect ratio correction: each cell is ~2x tall as it is wide,
+    // so we need ~2x the columns to look right visually.
+    let target_w = config.width as f32;
+    let target_h = config.height as f32;
+    let (out_w, out_h) = {
+        let fit_h = target_h;
+        let fit_w = (fit_h * src_aspect * 2.0).round();
+        if fit_w <= target_w {
+            (fit_w as u32, fit_h as u32)
+        } else {
+            let fit_w = target_w;
+            let fit_h = (fit_w / (src_aspect * 2.0)).round();
+            (fit_w as u32, fit_h as u32)
+        }
+    };
+    let out_w = out_w.max(4);
+    let out_h = out_h.max(4);
+
     let mut scaler = ffmpeg_next::software::scaling::Context::get(
         decoder.format(),
         decoder.width(),
         decoder.height(),
         Pixel::RGB24,
-        config.width as u32,
-        config.height as u32,
+        out_w,
+        out_h,
         Flags::BILINEAR,
     )
     .context("scaler")?;
 
     let mut decoded = ffmpeg_next::frame::Video::empty();
-    let mut rgb = Video::new(Pixel::RGB24, config.width as u32, config.height as u32);
+    let mut rgb = Video::new(Pixel::RGB24, out_w, out_h);
 
     let frame_dur = if config.fps_cap > 0 {
         std::time::Duration::from_millis(1000 / config.fps_cap as u64)
@@ -195,7 +218,7 @@ fn capture_loop(config: &WebcamConfig, tx: &Sender<AsciiFrame>, active: &Arc<Ato
                 thread::sleep(frame_dur - elapsed);
             }
             scaler.run(&decoded, &mut rgb)?;
-            let frame = rgb_to_ascii(&rgb, config.width, config.height);
+            let frame = rgb_to_ascii(&rgb, out_w as u16, out_h as u16);
             if tx.send(frame).is_err() {
                 return Ok(());
             }

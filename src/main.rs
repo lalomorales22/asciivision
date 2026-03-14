@@ -1286,14 +1286,14 @@ impl App {
 
     fn webcam_config(&self) -> webcam::WebcamConfig {
         let w = if self.body_area.width > 10 {
-            (self.body_area.width / 2).max(80).min(220)
+            self.body_area.width.max(120).min(300)
         } else {
-            160
+            200
         };
         let h = if self.body_area.height > 6 {
-            (self.body_area.height).max(24).min(70)
+            self.body_area.height.max(30).min(80)
         } else {
-            48
+            50
         };
         webcam::WebcamConfig {
             width: w,
@@ -1674,10 +1674,8 @@ impl App {
             self.render_tile_panel(frame, *panel, *rect, phase, is_focused);
         }
 
-        // 3D effects overlay on the full body area
-        if self.effects.active {
-            self.effects.render(frame.buffer_mut(), body_area, phase);
-        }
+        // Effects render ONLY inside the dedicated Effects3D tile panel,
+        // not as a global overlay (which would overwrite all other panels).
 
         self.render_input(frame, layout[2]);
         render_scroller(frame.buffer_mut(), layout[3], SCROLLER_TEXT, phase, COPPER);
@@ -1705,17 +1703,28 @@ impl App {
             PanelKind::Telemetry => self.render_telemetry(frame, area, phase),
             PanelKind::OpsDeck => self.render_ops_panel(frame, area, phase),
             PanelKind::Effects3D => {
+                let title = if self.effects.active {
+                    format!(" 3D EFFECTS // {} ", self.effects.kind.name())
+                } else {
+                    " 3D EFFECTS // OFFLINE ".to_string()
+                };
                 let block = Block::default()
-                    .title(" 3D EFFECTS ")
+                    .title(title)
                     .title_style(Style::default().fg(AMBER).bold())
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(if is_focused { CYAN } else { COPPER }));
                 frame.render_widget(block, area);
                 let inner = area.inner(Margin { horizontal: 1, vertical: 1 });
-                let mut standalone = EffectsEngine::new();
-                standalone.active = true;
-                standalone.kind = self.effects.kind;
-                standalone.render(frame.buffer_mut(), inner, phase);
+                if self.effects.active {
+                    self.effects.render(frame.buffer_mut(), inner, phase);
+                } else {
+                    frame.render_widget(
+                        Paragraph::new("F4 to activate // F7 cycle effect")
+                            .style(Style::default().fg(MUTED).bg(PANEL_BG))
+                            .alignment(Alignment::Center),
+                        inner,
+                    );
+                }
             }
             PanelKind::Analytics => {
                 self.analytics.refresh(self.db.as_ref());
@@ -2540,16 +2549,19 @@ fn render_ascii_frame(buffer: &mut Buffer, area: Rect, ascii: &video::AsciiFrame
         return;
     }
 
-    // Scaled path: nearest-neighbor sampling with aspect-ratio-preserving letterbox
+    // Scaled path: nearest-neighbor sampling with aspect-ratio-preserving letterbox.
+    // Both source and destination are in terminal-cell coordinates (where each cell
+    // is ~2x taller than wide), so we compare ratios directly -- no extra correction
+    // needed here since the webcam capture already accounts for cell aspect ratio.
     let src_ratio = ascii.width as f32 / ascii.height as f32;
     let dst_ratio = area.width as f32 / area.height as f32;
 
     let (fit_w, fit_h) = if src_ratio > dst_ratio {
-        let h = (area.width as f32 / src_ratio).round() as u16;
-        (area.width, h.max(1).min(area.height))
+        let h = (area.width as f32 / src_ratio).round().max(1.0) as u16;
+        (area.width, h.min(area.height))
     } else {
-        let w = (area.height as f32 * src_ratio).round() as u16;
-        (w.max(1).min(area.width), area.height)
+        let w = (area.height as f32 * src_ratio).round().max(1.0) as u16;
+        (w.min(area.width), area.height)
     };
 
     let offset_x = area.x + (area.width.saturating_sub(fit_w)) / 2;
