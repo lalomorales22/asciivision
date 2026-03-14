@@ -2,6 +2,8 @@
 
 > Agentic AI chat, live ASCII video, webcam streaming, WebSocket video chat, 3D terminal effects, Hyprland-style tiling, system monitoring, conversation analytics -- all in one terminal app.
 
+![ASCIIVision Screenshot](asciivision.png)
+
 ---
 
 ## What Is This
