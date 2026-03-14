@@ -325,7 +325,12 @@ impl App {
         }
 
         let webcam = if args.webcam {
-            WebcamCapture::start(webcam::WebcamConfig::default()).ok()
+            let config = webcam::WebcamConfig {
+                width: 160,
+                height: 48,
+                ..webcam::WebcamConfig::default()
+            };
+            WebcamCapture::start(config).ok()
         } else {
             None
         };
@@ -842,7 +847,8 @@ impl App {
                     self.webcam_frame = None;
                     self.status_note = "webcam offline".to_string();
                 } else {
-                    match WebcamCapture::start(webcam::WebcamConfig::default()) {
+                    let config = self.webcam_config();
+                    match WebcamCapture::start(config) {
                         Ok(cam) => {
                             self.webcam = Some(cam);
                             self.status_note = "webcam online: live ascii feed".to_string();
@@ -973,7 +979,8 @@ impl App {
                 self.webcam_frame = None;
                 self.add_system_message("webcam offline");
             } else {
-                match WebcamCapture::start(webcam::WebcamConfig::default()) {
+                let config = self.webcam_config();
+                match WebcamCapture::start(config) {
                     Ok(cam) => {
                         self.webcam = Some(cam);
                         self.add_system_message("webcam online: live ascii feed active");
@@ -1275,6 +1282,24 @@ impl App {
             let outcome = run_shell(command).await;
             let _ = tx.send(AppEvent::ShellFinished { outcome });
         });
+    }
+
+    fn webcam_config(&self) -> webcam::WebcamConfig {
+        let w = if self.body_area.width > 10 {
+            (self.body_area.width / 2).max(80).min(220)
+        } else {
+            160
+        };
+        let h = if self.body_area.height > 6 {
+            (self.body_area.height).max(24).min(70)
+        } else {
+            48
+        };
+        webcam::WebcamConfig {
+            width: w,
+            height: h,
+            ..webcam::WebcamConfig::default()
+        }
     }
 
     fn add_system_message(&mut self, content: impl Into<String>) {
@@ -2473,24 +2498,72 @@ fn resolve_video_path(background: Option<String>, intro: Option<String>) -> Opti
     if let Some(path) = intro {
         candidates.push(PathBuf::from(path));
     }
-    candidates.push(PathBuf::from("demo-videos/demo3.mp4"));
     candidates.push(PathBuf::from("demo-videos/demo.mp4"));
-    candidates.push(PathBuf::from("archive/mega-analytics/loading.mp4"));
 
     candidates.into_iter().find(|path| Path::new(path).exists())
 }
 
 fn render_ascii_frame(buffer: &mut Buffer, area: Rect, ascii: &video::AsciiFrame, intensity: f32) {
-    let content_width = std::cmp::min(ascii.width, area.width);
-    let content_height = std::cmp::min(ascii.height, area.height);
-    let offset_x = area.x + (area.width - content_width) / 2;
-    let offset_y = area.y + (area.height - content_height) / 2;
+    if area.width == 0 || area.height == 0 || ascii.width == 0 || ascii.height == 0 {
+        return;
+    }
 
-    for y in 0..content_height {
-        for x in 0..content_width {
-            let index = y as usize * ascii.width as usize + x as usize;
+    // If source matches destination closely, render directly (fast path)
+    let needs_scaling =
+        ascii.width.abs_diff(area.width) > 2 || ascii.height.abs_diff(area.height) > 2;
+
+    if !needs_scaling {
+        let content_width = std::cmp::min(ascii.width, area.width);
+        let content_height = std::cmp::min(ascii.height, area.height);
+        let offset_x = area.x + (area.width - content_width) / 2;
+        let offset_y = area.y + (area.height - content_height) / 2;
+
+        for y in 0..content_height {
+            for x in 0..content_width {
+                let index = y as usize * ascii.width as usize + x as usize;
+                if index >= ascii.cells.len() {
+                    break;
+                }
+                let (glyph, r, g, b) = ascii.cells[index];
+                let scanline = if y % 2 == 0 { 0.84 } else { 1.0 };
+                let factor = (intensity * scanline).clamp(0.1, 1.2);
+                let fg = scale_rgb(r, g, b, factor);
+                let bg = scale_rgb(r, g, b, factor * 0.16);
+
+                if let Some(cell) = buffer.cell_mut((offset_x + x, offset_y + y)) {
+                    cell.set_char(glyph);
+                    cell.set_fg(fg);
+                    cell.set_bg(bg);
+                }
+            }
+        }
+        return;
+    }
+
+    // Scaled path: nearest-neighbor sampling with aspect-ratio-preserving letterbox
+    let src_ratio = ascii.width as f32 / ascii.height as f32;
+    let dst_ratio = area.width as f32 / area.height as f32;
+
+    let (fit_w, fit_h) = if src_ratio > dst_ratio {
+        let h = (area.width as f32 / src_ratio).round() as u16;
+        (area.width, h.max(1).min(area.height))
+    } else {
+        let w = (area.height as f32 * src_ratio).round() as u16;
+        (w.max(1).min(area.width), area.height)
+    };
+
+    let offset_x = area.x + (area.width.saturating_sub(fit_w)) / 2;
+    let offset_y = area.y + (area.height.saturating_sub(fit_h)) / 2;
+
+    for y in 0..fit_h {
+        let src_y = ((y as f32 * ascii.height as f32 / fit_h as f32) as usize)
+            .min(ascii.height as usize - 1);
+        for x in 0..fit_w {
+            let src_x = ((x as f32 * ascii.width as f32 / fit_w as f32) as usize)
+                .min(ascii.width as usize - 1);
+            let index = src_y * ascii.width as usize + src_x;
             if index >= ascii.cells.len() {
-                break;
+                continue;
             }
             let (glyph, r, g, b) = ascii.cells[index];
             let scanline = if y % 2 == 0 { 0.84 } else { 1.0 };

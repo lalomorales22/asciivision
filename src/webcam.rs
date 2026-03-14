@@ -27,8 +27,8 @@ impl Default for WebcamConfig {
     fn default() -> Self {
         Self {
             device: "0".to_string(),
-            width: 80,
-            height: 24,
+            width: 160,
+            height: 48,
             fps_cap: 30,
         }
     }

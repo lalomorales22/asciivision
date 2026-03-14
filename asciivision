@@ -12,7 +12,9 @@ append_path_var() {
   fi
 }
 
-find_libclang_dir() {
+OS="$(uname -s)"
+
+setup_macos() {
   local candidates=(
     "${LIBCLANG_PATH:-}"
     "/opt/homebrew/opt/llvm/lib"
@@ -24,58 +26,81 @@ find_libclang_dir() {
     "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib"
   )
 
-  local brew_candidates=(
-    "llvm"
-    "llvm@21"
-    "llvm@20"
-  )
-
-  local formula
-  for formula in "${brew_candidates[@]}"; do
-    if command -v brew >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    local formula
+    for formula in llvm llvm@21 llvm@20; do
       local prefix
       prefix="$(brew --prefix "${formula}" 2>/dev/null || true)"
-      if [[ -n "${prefix}" ]]; then
+      if [[ -n "${prefix}" && -d "${prefix}/lib" ]]; then
         candidates+=("${prefix}/lib")
       fi
-    fi
-  done
+    done
+  fi
 
   local dir
   for dir in "${candidates[@]}"; do
     if [[ -n "${dir}" && -f "${dir}/libclang.dylib" ]]; then
-      printf '%s\n' "${dir}"
-      return 0
+      export LIBCLANG_PATH="${dir}"
+      break
     fi
   done
 
-  return 1
+  if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+    echo "Unable to find libclang.dylib." >&2
+    echo "Install Homebrew llvm or set LIBCLANG_PATH to the directory containing libclang.dylib." >&2
+    exit 1
+  fi
+
+  if [[ -d /opt/homebrew/lib/pkgconfig ]]; then
+    append_path_var PKG_CONFIG_PATH /opt/homebrew/lib/pkgconfig
+  fi
+  if [[ -d /usr/local/lib/pkgconfig ]]; then
+    append_path_var PKG_CONFIG_PATH /usr/local/lib/pkgconfig
+  fi
+  if [[ -d /opt/homebrew/include ]]; then
+    append_path_var CPATH /opt/homebrew/include
+  fi
+  if [[ -d /usr/local/include ]]; then
+    append_path_var CPATH /usr/local/include
+  fi
 }
 
-if [[ -d /opt/homebrew/lib/pkgconfig ]]; then
-  append_path_var PKG_CONFIG_PATH /opt/homebrew/lib/pkgconfig
-fi
+setup_linux() {
+  local candidates=(
+    "${LIBCLANG_PATH:-}"
+    "/usr/lib/llvm-18/lib"
+    "/usr/lib/llvm-17/lib"
+    "/usr/lib/llvm-16/lib"
+    "/usr/lib/llvm-15/lib"
+    "/usr/lib/llvm-14/lib"
+    "/usr/lib/x86_64-linux-gnu"
+    "/usr/lib64"
+    "/usr/lib"
+  )
 
-if [[ -d /usr/local/lib/pkgconfig ]]; then
-  append_path_var PKG_CONFIG_PATH /usr/local/lib/pkgconfig
-fi
+  local dir
+  for dir in "${candidates[@]}"; do
+    if [[ -n "${dir}" && -f "${dir}/libclang.so" ]]; then
+      export LIBCLANG_PATH="${dir}"
+      break
+    fi
+  done
 
-if [[ -d /opt/homebrew/include ]]; then
-  append_path_var CPATH /opt/homebrew/include
-fi
+  if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+    echo "Unable to find libclang.so." >&2
+    echo "Install libclang-dev (apt) or clang-devel (dnf) or set LIBCLANG_PATH." >&2
+    exit 1
+  fi
+}
 
-if [[ -d /usr/local/include ]]; then
-  append_path_var CPATH /usr/local/include
-fi
-
-LIBCLANG_DIR="$(find_libclang_dir || true)"
-if [[ -z "${LIBCLANG_DIR}" ]]; then
-  echo "Unable to find libclang.dylib." >&2
-  echo "Install Homebrew llvm or set LIBCLANG_PATH to the directory containing libclang.dylib." >&2
-  exit 1
-fi
-
-export LIBCLANG_PATH="${LIBCLANG_DIR}"
+case "${OS}" in
+  Darwin) setup_macos ;;
+  Linux)  setup_linux ;;
+  *)
+    echo "Unsupported OS: ${OS}. Set LIBCLANG_PATH manually and run: cargo build --release" >&2
+    exit 1
+    ;;
+esac
 
 cargo build --release
 exec ./target/release/gpt5-asciivision "$@"
