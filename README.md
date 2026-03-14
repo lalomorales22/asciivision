@@ -1,380 +1,296 @@
-# ASCIIVision Ecosystem 🚀
+# ASCIIVision v2.0 -- All-In-One Terminal Powerhouse
 
-> A complete terminal-based multimedia suite featuring ASCII video playback, multi-AI chat interface, and conversation analytics!
-<img width="1870" height="423" alt="Screenshot 2025-10-04 at 12 18 50 AM" src="https://github.com/user-attachments/assets/3fdc60cb-0436-43a7-ab80-68468b29c10b" />
-
-
-## 📦 Projects
-
-This repository contains three powerful terminal applications:
-
-### 1. 📺 ASCIIVision - Terminal Video Player
-Play MP4 videos as ASCII art directly in your terminal with retro CRT-style effects!
-
-### 2. 🤖 MEGA-CLI - Multi-AI Chat Interface
-Chat with all 4 major AI providers (Claude, Grok, GPT, Gemini) in a beautiful terminal interface with seamless provider switching.
-
-### 3. 📊 MEGA-Analytics - Conversation Dashboard
-Real-time analytics dashboard for tracking and viewing your AI conversations across all providers.
+> Agentic AI chat, live ASCII video, webcam streaming, WebSocket video chat, 3D terminal effects, Hyprland-style tiling, system monitoring, conversation analytics -- all in one terminal app.
 
 ---
 
-## 📺 ASCIIVision - Terminal Video Player
+## What Is This
 
-### ✨ Features
+ASCIIVision is a single Rust binary that packs an absurd amount of functionality into your terminal:
 
-- **🎬 Video Playback**: Converts MP4 videos to real-time ASCII art using FFmpeg
-- **🌈 Color Support**: Full RGB color support with automatic ASCII character mapping based on luminance
-- **📺 Retro CRT Effects**: Built-in visual effects including:
-  - Power-on sweep animation
-  - HSL color drift
-  - Terminal palette effects
-  - Glitch effects (toggleable)
-- **⚡ Smart Scaling**: Automatic aspect ratio preservation with terminal cell compensation
-- **🎛️ Interactive Controls**: Pause, color/mono toggle, and glitch effects control
-- **🚀 High Performance**: Multi-threaded decoding with frame buffering
+- **Multi-AI Chat** -- Claude Haiku 4.5, Grok 4 Fast, GPT-5 Nano, Gemini 3 Flash with live provider switching
+- **Streaming Responses** -- AI responses appear character-by-character in real-time via SSE streaming (Claude, OpenAI, Grok), with seamless tool-use handoff mid-stream
+- **Agentic Tool Use** -- AI can autonomously execute shell commands, read/write files, search codebases, make HTTP requests, and query system info with configurable approval gates
+- **Shell Execution** -- run any bash command inline with `!<cmd>`, plus `/curl` and `/brew` shortcuts
+- **ASCII Video Playback** -- MP4 files decoded to real-time colored ASCII art via FFmpeg
+- **Live Webcam** -- your camera feed converted to ASCII art in real-time, with error reporting when the device is busy
+- **WebSocket Video Chat** -- host or join multi-user live ASCII video chat rooms
+- **3D Terminal Effects** -- rainbow matrix rain, plasma fields, 3D starfield, wireframe rotating cube, fire simulation, particle storms
+- **Hyprland-Style Tiling** -- move, swap, resize, and reassign panels with Ctrl+hjkl keybindings and 6 layout presets
+- **System Monitor** -- live CPU, memory, swap, network I/O, load average, per-core sparklines
+- **Conversation Analytics** -- real-time stats dashboard with message counts, provider breakdown, bar charts
+- **Context Management** -- automatic summarization of older messages when the context window fills up, @-file injection, pinnable messages, persistent agent memory across sessions
+- **SQLite Persistence** -- all conversations and agent memory saved to `~/.config/asciivision/conversations.db`
+- **Cracktro Intro** -- animated boot sequence with starburst effects, raster bars, and scrolling ticker
 
-### 🚀 Installation
+Legacy companion apps (mega-cli, mega-analytics) are preserved in the `archive/` directory.
 
-#### Prerequisites
+---
 
-- **Rust** (latest stable version)
-- **FFmpeg** development libraries installed on your system
+## Quick Start
 
-##### Installing FFmpeg (macOS)
+### Prerequisites
+
+- **Rust** (stable)
+- **FFmpeg** dev libraries
+
 ```bash
+# macOS
 brew install ffmpeg
-```
 
-##### Installing FFmpeg (Ubuntu/Debian)
-```bash
-sudo apt update
+# Ubuntu/Debian
 sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev pkg-config
 ```
 
-#### Build from Source
+### Build & Run
 
 ```bash
-cd asciivision
+# From the repo root
+./asciivision
+
+# Or manually
 cargo build --release
+./target/release/gpt5-asciivision
 ```
 
-The compiled binary will be available at `target/release/gpt5-asciivision`.
+### API Keys
 
-### 🎮 Usage
+Copy `.env.example` to `.env` in the repo root and fill in your keys:
 
-#### Basic Usage
-```bash
-./target/release/gpt5-asciivision video.mp4
+```
+CLAUDE_API_KEY=sk-ant-...
+GROK_API_KEY=xai-...
+OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=AIza...
 ```
 
-#### Advanced Options
-```bash
-./target/release/gpt5-asciivision [OPTIONS] <INPUT>
+Only the providers you want to use need keys. The app works without any keys (shell, video, webcam, effects, tiling, sysmon all work standalone).
 
-Arguments:
-  <INPUT>  Path to an .mp4 (H.264/H.265/etc supported by system FFmpeg)
+---
+
+## AI Models
+
+| Provider | Model | Display Name |
+|----------|-------|-------------|
+| Anthropic | `claude-haiku-4-5` | Claude Haiku 4.5 |
+| xAI | `grok-4-fast-non-reasoning` | Grok 4 Fast |
+| OpenAI | `gpt-5-nano` | GPT-5 Nano |
+| Google | `gemini-3-flash-preview` | Gemini 3 Flash |
+
+Cycle between providers with F2 or `/provider <name>`.
+
+---
+
+## CLI Flags
+
+```
+gpt5-asciivision [OPTIONS]
 
 Options:
-      --max-width <MAX_WIDTH>  Target max width in terminal cells (height auto) [default: 140]
-      --fps-cap <FPS_CAP>      Limit FPS (0 = use stream rate) [default: 0]
-      --mono                   Force monochrome output
-  -h, --help                   Print help
+  --provider <NAME>          AI provider: claude, grok, gpt, gemini [default: claude]
+  --background-video <PATH>  MP4 file for the video panel
+  --intro-video <PATH>       MP4 file for the intro sequence
+  --skip-intro               Jump straight to the command deck
+  --no-video                 Disable all video decoding
+  --no-db                    Disable SQLite persistence
+  --serve <PORT>             Start a WebSocket video chat server on this port
+  --connect <URL>            Connect to a video chat server (ws://host:port)
+  --username <NAME>          Username for video chat [default: anon]
+  --webcam                   Enable webcam capture on startup
+  --effects                  Start with 3D effects active
 ```
 
-### 🎛️ Controls
+---
+
+## Keyboard Controls
+
+### Core
 
 | Key | Action |
 |-----|--------|
-| `Space` | Pause/Resume playback |
-| `Q` or `Esc` | Quit |
-| `C` | Toggle between color and monochrome |
-| `G` | Toggle glitch effects |
+| `F1` | Help overlay |
+| `F2` | Cycle AI provider |
+| `F3` | Toggle video panel |
+| `F4` | Toggle 3D effects overlay |
+| `F5` | Toggle webcam capture |
+| `F6` | Cycle tiling layout preset |
+| `F7` | Cycle 3D effect type |
+| `F8` | Cycle focused tile's panel type |
+| `Ctrl+L` | Clear transcript |
+| `Ctrl+C` | Exit |
+| `Esc` | Exit (if input empty) / Clear input (if typing) |
+| `PgUp/PgDn` | Scroll transcript |
 
----
-
-## 🤖 MEGA-CLI - Multi-AI Chat Interface
-
-### ✨ Features
-
-- **🔄 Multi-AI Support**: Seamlessly switch between Claude Sonnet 4.5, Grok 4, GPT-5, and Gemini 2.5 Pro
-- **⚡ Real-time Streaming**: Fast responses with async API calls
-- **🎨 Beautiful UI**: Color-coded interfaces for each AI provider
-- **💾 Conversation History**: Automatic saving to SQLite database
-- **🎬 Cinematic Loading**: Optional video loading animation
-- **🔧 Smart Switching**: Press F2 to cycle through AI providers without losing context
-- **📊 Database Integration**: All conversations automatically saved for analytics
-
-### 🚀 Installation
-
-#### Prerequisites
-
-- **Rust** (latest stable version)
-- **FFmpeg** (for loading animation)
-- **API Keys** for AI providers you want to use:
-  - `CLAUDE_API_KEY` - Anthropic API key
-  - `GROK_API_KEY` - xAI API key
-  - `OPENAI_API_KEY` - OpenAI API key
-  - `GEMINI_API_KEY` - Google AI API key
-
-#### Setup
-
-1. Create a `.env` file in the `mega-cli` directory:
-```bash
-cd mega-cli
-cat > .env << EOF
-CLAUDE_API_KEY=your_claude_key_here
-GROK_API_KEY=your_grok_key_here
-OPENAI_API_KEY=your_openai_key_here
-GEMINI_API_KEY=your_gemini_key_here
-EOF
-```
-
-2. Build the project:
-```bash
-cargo build --release
-```
-
-### 🎮 Usage
-
-```bash
-# Start with default provider (Claude)
-./target/release/mega-cli
-
-# Skip loading video
-./target/release/mega-cli --skip-loading
-
-# Start with a specific provider
-./target/release/mega-cli --provider grok
-```
-
-### 🎛️ Controls
+### Tiling (Hyprland-style)
 
 | Key | Action |
 |-----|--------|
-| `F1` | Toggle help screen |
-| `F2` | Switch AI provider (Claude → Grok → GPT → Gemini) |
-| `Ctrl+L` | Clear current conversation |
-| `Ctrl+C` | Exit application |
-| `Enter` | Send message |
-| `↑/↓` | Scroll through messages |
-| `PgUp/PgDn` | Scroll 10 messages at a time |
+| `Alt+h` | Focus tile to the left |
+| `Alt+l` | Focus tile to the right |
+| `Alt+k` | Focus tile above |
+| `Alt+j` | Focus tile below |
+| `Alt+H` | Swap focused tile left (Shift) |
+| `Alt+L` | Swap focused tile right (Shift) |
+| `Alt+K` | Swap focused tile up (Shift) |
+| `Alt+J` | Swap focused tile down (Shift) |
+| `Alt+[` | Shrink focused split |
+| `Alt+]` | Grow focused split |
+| `Alt+n` | Cycle focused tile to next panel type |
 
-### 🎨 AI Providers
-
-- **Claude Sonnet 4.5** - Copper theme
-- **Grok 4** - Cyan theme
-- **GPT-5** - Teal theme
-- **Gemini 2.5 Pro** - Blue theme
+The focused tile is highlighted with a double border.
 
 ---
 
-## 📊 MEGA-Analytics - Conversation Dashboard
+## Slash Commands
 
-### ✨ Features
+| Command | Description |
+|---------|-------------|
+| `!<cmd>` | Execute shell command (e.g., `!ls -la`, `!git status`) |
+| `/curl <args>` | Shortcut for curl |
+| `/brew <args>` | Shortcut for brew |
+| `/provider <name>` | Switch AI provider |
+| `/video` | Toggle video panel |
+| `/webcam` | Toggle webcam |
+| `/3d` or `/effects` | Toggle 3D effects |
+| `/fx` | Cycle to next 3D effect |
+| `/analytics` | Show analytics in focused tile |
+| `/sysmon` | Show system monitor in focused tile |
+| `/layout` | Cycle layout preset |
+| `/layout <name>` | Set layout: default, dual, triple, quad, webcam, focus |
+| `/server <port>` | Host WebSocket video chat server |
+| `/connect ws://<addr>` | Join video chat server |
+| `/chat <msg>` | Send message in video chat |
+| `/username <name>` | Set your video chat username |
+| `/clear` | Clear transcript |
+| `/help` | Toggle help overlay |
 
-- **📈 Real-time Updates**: Automatically refreshes when new conversations are saved
-- **🔄 Multi-Provider Views**: Switch between Claude, Grok, GPT, and Gemini analytics
-- **📊 Statistics Dashboard**: View message counts, timestamps, and conversation metrics
-- **💬 Full Message History**: Browse complete conversation logs with timestamps
-- **🎬 Cinematic Loading**: Optional video loading animation
-- **⚡ Live Monitoring**: File-watching system detects database changes instantly
+---
 
-### 🚀 Installation
+## Tiling Layout Presets
 
-#### Prerequisites
+| Preset | Description |
+|--------|-------------|
+| **Default** | Transcript (55%) + Video/Webcam/Telemetry+SysMon/Ops stacked right |
+| **Dual Pane** | Transcript (50%) + Webcam/SysMon stacked |
+| **Triple Column** | Three columns: transcript, video+telemetry, webcam+sysmon+ops |
+| **Quad** | 2x2 grid: transcript, video, webcam, sysmon+ops |
+| **Webcam Focus** | Webcam gets 70% of the right side, transcript+sysmon left |
+| **Full Focus** | Single full-screen transcript |
 
-- **Rust** (latest stable version)
-- **FFmpeg** (for loading animation)
-- **MEGA-CLI** must be used first to create the conversation database
+Every tile can be reassigned to any of 11 panel types: Transcript, Video, Webcam, Telemetry, Ops Deck, 3D Effects, Analytics, Video Chat Feeds, Video Chat Messages, Video Chat Users, or System Monitor.
 
-#### Build
+---
+
+## 3D Effects
+
+Six terminal-rendered visual effects, cycled with F7 or `/fx`:
+
+1. **Rainbow Matrix Rain** -- cascading characters with per-column rainbow hues that drift over time, white head glow, color-tinted backgrounds
+2. **Plasma Field** -- RGB sine-wave interference patterns with smooth color cycling
+3. **3D Starfield** -- perspective-projected stars flying toward the camera with depth-based brightness
+4. **Wireframe 3D** -- rotating cube rendered with ASCII line-drawing and labeled vertices
+5. **Fire Simulation** -- bottom-up flame propagation with heat diffusion and ember colors
+6. **Particle Storm** -- multi-colored particles exploding from center with gravity and fade
+
+---
+
+## System Monitor
+
+Live system telemetry panel (powered by `sysinfo`) showing:
+
+- **CPU** -- global usage percentage with colored bar and per-core sparkline
+- **Memory** -- used/total with bar graph, color-coded thresholds
+- **Swap** -- usage with bar (if swap is active)
+- **Network** -- upload/download bytes with arrow indicators
+- **Load Average** -- 1/5/15 minute load
+- **Cores** -- thread count
+
+Thresholds: green (<50%), amber (50-80%), red (>80%) for CPU and memory.
+
+---
+
+## Webcam
+
+Live camera capture converted to ASCII art using FFmpeg's AVFoundation (macOS), V4L2 (Linux), or DirectShow (Windows).
+
+- Toggle with F5 or `/webcam`
+- If another app (OBS, Zoom, FaceTime) has the camera locked, the panel shows a red error message explaining the conflict and how to fix it
+- The capture thread is crash-safe (wrapped in `catch_unwind`) so a webcam failure never takes down the app
+- Camera errors are surfaced in both the webcam panel and the status ticker
+
+---
+
+## WebSocket Video Chat
+
+Host a server and connect clients for multi-user live ASCII webcam streaming in the terminal.
 
 ```bash
-cd mega-analytics
-cargo build --release
+# Machine A: host the server
+./target/release/gpt5-asciivision --serve 8080
+
+# Machine B: connect as a client
+./target/release/gpt5-asciivision --connect ws://192.168.1.100:8080 --username alice --webcam
 ```
 
-### 🎮 Usage
-
-```bash
-# Start the analytics dashboard
-./target/release/mega-analytics
+Or use slash commands at runtime:
+```
+/server 8080
+/connect ws://192.168.1.100:8080
+/chat hello everyone
 ```
 
-The dashboard will automatically connect to `~/.config/mega-cli/conversations.db` and display your conversation history.
-
-### 🎛️ Controls
-
-| Key | Action |
-|-----|--------|
-| `←/→` | Switch between AI providers |
-| `1-4` | Quick switch to specific provider (1=Claude, 2=Grok, 3=GPT, 4=Gemini) |
-| `Tab` | Toggle between Statistics and Messages view |
-| `↑/↓` | Scroll through messages |
-| `PgUp/PgDn` | Scroll 10 messages at a time |
-| `Home/End` | Jump to start/end of conversation |
-| `Q` or `Esc` | Exit |
-| `Ctrl+C` | Force quit |
-
-### 📊 Views
-
-#### Statistics View
-- Total message count
-- User messages vs AI responses
-- First and last message timestamps
-- Per-provider conversation metrics
-
-#### Messages View
-- Complete conversation history
-- Color-coded by role (User/Assistant)
-- Timestamps for each message
-- Scrollable with visual scrollbar
+The video chat panel shows up to 4 remote feeds in a grid, a chat stream, and a connected users list.
 
 ---
 
-## 🛠️ Technical Details
-
-### Shared Architecture
-
-All three applications are built with:
-- **Rust**: Safe, fast, and concurrent
-- **Ratatui**: Terminal UI framework
-- **TachyonFX**: Visual effects system
-- **Crossterm**: Cross-platform terminal manipulation
-- **FFmpeg**: Video decoding (ASCIIVision & loading screens)
-
-### Database Schema
-
-MEGA-CLI and MEGA-Analytics share a SQLite database at `~/.config/mega-cli/conversations.db`:
-
-```sql
--- Separate tables for each provider
-CREATE TABLE claude_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    timestamp INTEGER NOT NULL
-);
-
-CREATE TABLE grok_messages (...);
-CREATE TABLE gpt_messages (...);
-CREATE TABLE gemini_messages (...);
-```
-
----
-
-## 📋 System Requirements
-
-- **Operating System**: macOS, Linux, or Windows
-- **Terminal**: Any modern terminal with RGB color support
-- **Rust**: 1.70 or later
-- **FFmpeg**: 4.0 or later (for video features)
-
----
-
-## 🐛 Troubleshooting
-
-### FFmpeg Errors
-If you get FFmpeg-related errors:
-1. Ensure FFmpeg development libraries are installed
-2. Try re-encoding your video: `ffmpeg -i input.mp4 -c:v libx264 output.mp4`
-
-### API Key Issues (MEGA-CLI)
-- Ensure your `.env` file is in the `mega-cli` directory
-- Check that API keys are valid and have proper permissions
-- Keys are loaded when the application starts
-
-### Database Issues (MEGA-Analytics)
-- Make sure you've used MEGA-CLI at least once to create the database
-- Check that `~/.config/mega-cli/conversations.db` exists
-- Database is created automatically on first MEGA-CLI run
-
----
-
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 asciivision/
-├── README.md                 # This file
-├── asciivision/             # Video player
-│   ├── src/
-│   │   ├── main.rs
-│   │   └── video.rs
-│   └── Cargo.toml
-├── mega-cli/                # Multi-AI chat interface
-│   ├── src/
-│   │   ├── main.rs
-│   │   ├── chat.rs
-│   │   ├── ai.rs
-│   │   ├── db.rs
-│   │   └── video.rs
-│   ├── .env                 # API keys (create this)
-│   └── Cargo.toml
-└── mega-analytics/          # Analytics dashboard
-    ├── src/
-    │   ├── main.rs
-    │   └── video.rs
-    └── Cargo.toml
+├── asciivision          # Launcher script (builds + runs)
+├── Cargo.toml           # Main crate dependencies
+├── .env.example         # API key template (copy to .env)
+├── src/
+│   ├── main.rs          # App shell: modes, rendering, input dispatch, tiling integration
+│   ├── ai.rs            # Multi-provider AI client with streaming (Claude, Grok, GPT-5, Gemini)
+│   ├── tools.rs         # Agentic tool definitions and execution (shell, files, search, HTTP, sysinfo)
+│   ├── memory.rs        # Persistent agent memory (SQLite-backed key-value store)
+│   ├── video.rs         # FFmpeg-based MP4 to ASCII art decoder
+│   ├── webcam.rs        # Live webcam capture with ASCII conversion + error reporting
+│   ├── shell.rs         # Async shell command execution with timeout
+│   ├── db.rs            # SQLite conversation persistence
+│   ├── tiling.rs        # Binary-tree tiling window manager with 6 presets
+│   ├── sysmon.rs        # System monitor (CPU, memory, network, load)
+│   ├── effects.rs       # 3D terminal effects engine (6 effects, rainbow matrix)
+│   ├── analytics.rs     # Conversation analytics dashboard with bar charts
+│   ├── server.rs        # WebSocket video chat server (multi-user broadcast)
+│   ├── client.rs        # WebSocket video chat client (webcam + chat)
+│   └── message.rs       # WebSocket protocol message types
+├── archive/
+│   ├── mega-cli/        # Legacy standalone multi-AI chat app
+│   └── mega-analytics/  # Legacy standalone analytics dashboard
+└── demo-videos/         # Sample MP4 files
 ```
 
 ---
 
-## 🎯 Getting Started
+## Dependencies
 
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd asciivision
-   ```
-
-2. **Install FFmpeg**
-   ```bash
-   # macOS
-   brew install ffmpeg
-
-   # Ubuntu/Debian
-   sudo apt install ffmpeg libavformat-dev libavcodec-dev libswscale-dev libavutil-dev
-   ```
-
-3. **Set up MEGA-CLI** (optional, for AI chat)
-   ```bash
-   cd mega-cli
-   # Create .env with your API keys
-   echo "CLAUDE_API_KEY=your_key" > .env
-   cargo build --release
-   ```
-
-4. **Build all projects**
-   ```bash
-   # From the asciivision root directory
-   cd asciivision && cargo build --release && cd ..
-   cd mega-cli && cargo build --release && cd ..
-   cd mega-analytics && cargo build --release && cd ..
-   ```
-
-5. **Run the apps**
-   ```bash
-   # Video player
-   ./asciivision/target/release/gpt5-asciivision video.mp4
-
-   # AI chat
-   ./mega-cli/target/release/mega-cli
-
-   # Analytics (run after using mega-cli)
-   ./mega-analytics/target/release/mega-analytics
-   ```
+| Category | Crates |
+|----------|--------|
+| Core | `ratatui`, `crossterm`, `tachyonfx`, `tokio`, `clap`, `anyhow` |
+| Video | `ffmpeg-next`, `ffmpeg-sys-next`, `crossbeam-channel` |
+| AI | `reqwest`, `serde`, `serde_json`, `dotenvy` |
+| Networking | `tokio-tungstenite`, `futures`, `parking_lot`, `uuid` |
+| System | `sysinfo`, `rusqlite`, `chrono`, `rand` |
 
 ---
 
-## 📝 License
+## Requirements
 
-[Add your license here]
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
-
----
-
-*Experience the future of terminal computing! 🚀*
+- macOS, Linux, or Windows
+- Terminal with RGB color support (iTerm2, Kitty, Alacritty, WezTerm, etc.)
+- Rust 1.70+
+- FFmpeg 4.0+ (for video/webcam features)
+- A webcam (optional, for webcam/video chat features)
+- Only one app can use the webcam at a time on macOS -- close OBS/Zoom/FaceTime before enabling webcam capture
