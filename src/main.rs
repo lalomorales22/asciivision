@@ -27,6 +27,7 @@ mod message;
 mod server;
 mod shell;
 mod sysmon;
+mod theme;
 mod tiling;
 mod tools;
 mod video;
@@ -44,19 +45,9 @@ use sysmon::SystemMonitor;
 use tiling::{LayoutPreset, PanelKind, TilingManager};
 use tools::{ToolCall, ToolResult, TrustLevel};
 use video::VideoPlayer;
+use theme::t;
 use webcam::WebcamCapture;
 
-const BG_BASE: Color = Color::Rgb(3, 8, 12);
-const BG_ALT: Color = Color::Rgb(10, 17, 24);
-const PANEL_BG: Color = Color::Rgb(6, 13, 19);
-const PANEL_ALT: Color = Color::Rgb(10, 19, 29);
-const COPPER: Color = Color::Rgb(214, 153, 104);
-const AMBER: Color = Color::Rgb(241, 189, 105);
-const TEAL: Color = Color::Rgb(54, 154, 158);
-const CYAN: Color = Color::Rgb(118, 214, 226);
-const ICE: Color = Color::Rgb(207, 230, 232);
-const DANGER: Color = Color::Rgb(225, 92, 84);
-const MUTED: Color = Color::Rgb(101, 121, 134);
 const INTRO_DURATION: Duration = Duration::from_millis(7600);
 
 const LARGE_LOGO: &[&str] = &[
@@ -240,6 +231,7 @@ struct App {
     stream_message_index: Option<usize>,
     pinned_messages: Vec<usize>,
     shell_output_history: VecDeque<String>,
+    prev_mode: AppMode,
 }
 
 impl ChatMessage {
@@ -248,7 +240,7 @@ impl ChatMessage {
             kind: MessageKind::User,
             label: "YOU".to_string(),
             content,
-            accent: CYAN,
+            accent: t().accent4,
             include_in_context: true,
             context_role: "user",
         }
@@ -281,7 +273,7 @@ impl ChatMessage {
             kind: MessageKind::System,
             label: "SYSTEM".to_string(),
             content: content.into(),
-            accent: COPPER,
+            accent: t().accent1,
             include_in_context: false,
             context_role: "user",
         }
@@ -389,6 +381,11 @@ impl App {
             stream_message_index: None,
             pinned_messages: Vec::new(),
             shell_output_history: VecDeque::new(),
+            prev_mode: if args.skip_intro {
+                AppMode::Chat
+            } else {
+                AppMode::Intro
+            },
         };
 
         app.add_system_message(
@@ -540,7 +537,7 @@ impl App {
                     }
 
                     for tr in &tool_results {
-                        let _accent = if tr.success { TEAL } else { DANGER };
+                        let _accent = if tr.success { t().accent3 } else { t().danger };
                         let label = format!("[TOOL:{}]", tr.name);
                         let summary = truncate(&tr.content, 200);
                         self.add_system_message(format!(
@@ -689,7 +686,7 @@ impl App {
                 AppEvent::ShellFinished { outcome } => {
                     self.pending_shells = self.pending_shells.saturating_sub(1);
                     let success = outcome.exit_code.unwrap_or(1) == 0 && !outcome.timed_out;
-                    let accent = if success { TEAL } else { DANGER };
+                    let accent = if success { t().accent3 } else { t().danger };
                     let text = format_outcome(&outcome, 4200);
                     let index = self.messages.len();
                     self.messages.push(ChatMessage::shell(accent));
@@ -784,6 +781,7 @@ impl App {
                 }
                 Event::Resize(_, _) => {
                     self.follow_tail = true;
+                    self.scroll_lines = 0;
                 }
                 _ => {}
             }
@@ -816,6 +814,17 @@ impl App {
             }
             KeyCode::F(1) => {
                 self.show_help = !self.show_help;
+                theme::set_random_theme();
+                self.status_note = "theme randomized // F1 help".to_string();
+            }
+            KeyCode::F(9) => {
+                theme::set_random_theme();
+                self.status_note = "theme randomized".to_string();
+                self.add_system_message("color palette randomized -- F9 again for another, /theme reset to restore defaults");
+            }
+            KeyCode::F(10) => {
+                theme::reset_theme();
+                self.status_note = "theme restored to default".to_string();
             }
             KeyCode::F(2) => {
                 self.session_id = self.session_id.wrapping_add(1);
@@ -1005,6 +1014,20 @@ impl App {
             self.effects.cycle();
             self.effects.active = true;
             self.add_system_message(format!("3D effect: {}", self.effects.kind.name()));
+            return;
+        }
+
+        if input == "/randomize" || input == "/theme random" {
+            theme::set_random_theme();
+            self.add_system_message("color palette randomized -- /theme reset to restore defaults");
+            self.status_note = "theme randomized".to_string();
+            return;
+        }
+
+        if input == "/theme reset" || input == "/theme default" {
+            theme::reset_theme();
+            self.add_system_message("theme restored to factory defaults");
+            self.status_note = "theme reset".to_string();
             return;
         }
 
@@ -1534,10 +1557,10 @@ impl App {
     fn render_intro(&self, frame: &mut Frame, area: Rect, phase: f32) {
         let outer = Block::default()
             .title(" [SYSTEM:DEM0ZONE v2.0] [MODE:AGENTIC] [MODULES:AI+VIDEO+WEBCAM+3D+ANALYTICS] ")
-            .title_style(Style::default().fg(CYAN).bold())
+            .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(outer, area);
 
         let inner = area.inner(Margin {
@@ -1550,9 +1573,9 @@ impl App {
             let video_area = centered_area(inner, 82, 54);
             let shell = Block::default()
                 .title(" LIVE FEED // DECOMPRESSING ")
-                .title_style(Style::default().fg(AMBER).bold())
+                .title_style(Style::default().fg(t().accent2).bold())
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(TEAL));
+                .border_style(Style::default().fg(t().accent3));
             frame.render_widget(shell, video_area);
             video.render(
                 frame,
@@ -1566,7 +1589,7 @@ impl App {
 
         let burst_x = inner.x + inner.width.saturating_mul(22) / 100;
         let burst_y = inner.y + inner.height.saturating_mul(34) / 100;
-        render_starburst(frame.buffer_mut(), burst_x, burst_y, 12, phase);
+        render_starburst(frame.buffer_mut(), burst_x, burst_y, 12, phase, Some(inner));
 
         let logo = if inner.width > 108 {
             LARGE_LOGO
@@ -1584,33 +1607,33 @@ impl App {
 
         let info = vec![
             Line::from(vec![
-                Span::styled("v2.0.0", Style::default().fg(MUTED)),
-                Span::styled("  (POWERHOUSE)  ", Style::default().fg(ICE)),
-                Span::styled("//", Style::default().fg(COPPER)),
+                Span::styled("v2.0.0", Style::default().fg(t().muted)),
+                Span::styled("  (POWERHOUSE)  ", Style::default().fg(t().text)),
+                Span::styled("//", Style::default().fg(t().accent1)),
                 Span::styled(
                     "  ALL-IN-ONE TERMINAL COMMAND CENTER",
-                    Style::default().fg(CYAN).bold(),
+                    Style::default().fg(t().accent4).bold(),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("STACK:", Style::default().fg(AMBER).bold()),
+                Span::styled("STACK:", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     " ASCII VIDEO | MULTI-AI | LIVE BASH | WEBCAM | 3D FX | VIDEO CHAT | ANALYTICS",
-                    Style::default().fg(ICE),
+                    Style::default().fg(t().text),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("STATE:", Style::default().fg(AMBER).bold()),
+                Span::styled("STATE:", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     " cracktro boot stream -> auto-transitions into the full command deck",
-                    Style::default().fg(ICE),
+                    Style::default().fg(t().text),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("INPUT:", Style::default().fg(AMBER).bold()),
+                Span::styled("INPUT:", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     " ENTER / SPACE skips intro immediately",
-                    Style::default().fg(ICE),
+                    Style::default().fg(t().text),
                 ),
             ]),
         ];
@@ -1628,7 +1651,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(Text::from(info))
                 .wrap(Wrap { trim: false })
-                .style(Style::default().bg(PANEL_BG)),
+                .style(Style::default().bg(t().panel_bg)),
             info_area.inner(Margin {
                 horizontal: 1,
                 vertical: 1,
@@ -1646,7 +1669,7 @@ impl App {
             scroller_area,
             SCROLLER_TEXT,
             phase,
-            CYAN,
+            t().accent4,
         );
     }
 
@@ -1656,7 +1679,7 @@ impl App {
             .constraints([
                 Constraint::Length(5),
                 Constraint::Min(14),
-                Constraint::Length(5),
+                Constraint::Length(4),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -1678,7 +1701,7 @@ impl App {
         // not as a global overlay (which would overwrite all other panels).
 
         self.render_input(frame, layout[2]);
-        render_scroller(frame.buffer_mut(), layout[3], SCROLLER_TEXT, phase, COPPER);
+        render_scroller(frame.buffer_mut(), layout[3], SCROLLER_TEXT, phase, t().accent1);
 
         if self.show_help {
             self.render_help_overlay(frame, area);
@@ -1693,9 +1716,14 @@ impl App {
         phase: f32,
         is_focused: bool,
     ) {
-        if area.width < 6 || area.height < 4 {
+        if area.width < 8 || area.height < 4 {
             return;
         }
+        // solid background fill: kill ghost artifacts from previous frames
+        frame.render_widget(
+            Block::default().style(Style::default().bg(t().panel_bg)),
+            area,
+        );
         match panel {
             PanelKind::Transcript => self.render_messages_tile(frame, area, is_focused),
             PanelKind::Video => self.render_video_panel(frame, area, phase),
@@ -1710,9 +1738,9 @@ impl App {
                 };
                 let block = Block::default()
                     .title(title)
-                    .title_style(Style::default().fg(AMBER).bold())
+                    .title_style(Style::default().fg(t().accent2).bold())
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if is_focused { CYAN } else { COPPER }));
+                    .border_style(Style::default().fg(if is_focused { t().accent4 } else { t().accent1 }));
                 frame.render_widget(block, area);
                 let inner = area.inner(Margin { horizontal: 1, vertical: 1 });
                 if self.effects.active {
@@ -1720,7 +1748,7 @@ impl App {
                 } else {
                     frame.render_widget(
                         Paragraph::new("F4 to activate // F7 cycle effect")
-                            .style(Style::default().fg(MUTED).bg(PANEL_BG))
+                            .style(Style::default().fg(t().muted).bg(t().panel_bg))
                             .alignment(Alignment::Center),
                         inner,
                     );
@@ -1740,10 +1768,10 @@ impl App {
     }
 
     fn render_messages_tile(&self, frame: &mut Frame, area: Rect, is_focused: bool) {
-        let border_color = if is_focused { CYAN } else { TEAL };
+        let border_color = if is_focused { t().accent4 } else { t().accent3 };
         let block = Block::default()
             .title(" TRANSCRIPT ")
-            .title_style(Style::default().fg(CYAN).bold())
+            .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
             .border_type(if is_focused {
                 BorderType::Double
@@ -1760,10 +1788,10 @@ impl App {
     fn render_header(&self, frame: &mut Frame, area: Rect, phase: f32) {
         let block = Block::default()
             .title(" COMMAND DECK ")
-            .title_style(Style::default().fg(COPPER).bold())
+            .title_style(Style::default().fg(t().accent1).bold())
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -1776,14 +1804,15 @@ impl App {
             inner.y + 1,
             3,
             phase * 1.2 + 1.0,
+            Some(inner),
         );
         render_gradient_text(
             frame.buffer_mut(),
             inner.x + 10,
             inner.y,
             "ASCIIVISION v2 // ALL-IN-ONE TERMINAL POWERHOUSE",
-            COPPER,
-            CYAN,
+            t().accent1,
+            t().accent4,
         );
 
         let fx_tag = if self.effects.active {
@@ -1821,7 +1850,7 @@ impl App {
             inner.x + 10,
             inner.y + 1,
             &meta,
-            ICE,
+            t().text,
             self.provider.color(),
         );
 
@@ -1833,8 +1862,8 @@ impl App {
             x,
             inner.y,
             &format!("{} {}", badge, status),
-            AMBER,
-            ICE,
+            t().accent2,
+            t().text,
         );
     }
 
@@ -1852,13 +1881,13 @@ impl App {
                     format!("{} ", message.label),
                     Style::default().fg(message.accent).bold(),
                 ),
-                Span::styled(format!("[{}]", tag), Style::default().fg(AMBER)),
+                Span::styled(format!("[{}]", tag), Style::default().fg(t().accent2)),
             ]));
 
             if message.content.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "  . . .",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(t().muted),
                 )));
             } else {
                 for content_line in message.content.lines() {
@@ -1866,7 +1895,7 @@ impl App {
                         format!("  {}", content_line),
                         Style::default().fg(match message.kind {
                             MessageKind::System => Color::Rgb(171, 183, 192),
-                            _ => ICE,
+                            _ => t().text,
                         }),
                     )));
                 }
@@ -1877,12 +1906,18 @@ impl App {
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No traffic yet. Ask the model something, !shell, /webcam, /3d, /server, or /connect.",
-                Style::default().fg(MUTED),
+                Style::default().fg(t().muted),
             )));
         }
 
-        let total_lines = lines.len().max(1);
-        let visible_lines = inner.height.saturating_sub(1) as usize;
+        // Estimate wrapped line count so scroll doesn't overshoot
+        let wrap_width = inner.width.max(1) as usize;
+        let total_wrapped: usize = lines.iter().map(|l| {
+            let w = l.width();
+            if w == 0 { 1 } else { (w + wrap_width - 1) / wrap_width }
+        }).sum();
+        let total_lines = total_wrapped.max(1);
+        let visible_lines = inner.height as usize;
         let max_scroll = total_lines.saturating_sub(visible_lines);
         let scroll = if self.follow_tail {
             max_scroll
@@ -1893,7 +1928,7 @@ impl App {
         let widget = Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0))
-            .style(Style::default().bg(PANEL_BG));
+            .style(Style::default().bg(t().panel_bg));
         frame.render_widget(widget, inner);
     }
 
@@ -1905,9 +1940,9 @@ impl App {
         };
         let block = Block::default()
             .title(title)
-            .title_style(Style::default().fg(AMBER).bold())
+            .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -1923,7 +1958,7 @@ impl App {
                     if video.has_signal() { "lock" } else { "seek" },
                     self.provider.badge()
                 );
-                render_gradient_text(frame.buffer_mut(), inner.x + 1, inner.y, &meta, CYAN, ICE);
+                render_gradient_text(frame.buffer_mut(), inner.x + 1, inner.y, &meta, t().accent4, t().text);
                 return;
             }
         }
@@ -1939,9 +1974,9 @@ impl App {
         };
         let block = Block::default()
             .title(title)
-            .title_style(Style::default().fg(CYAN).bold())
+            .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(TEAL));
+            .border_style(Style::default().fg(t().accent3));
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -1962,13 +1997,13 @@ impl App {
                 "F5 or /webcam to activate".to_string()
             };
             let color = if self.webcam.as_ref().and_then(|c| c.error()).is_some() {
-                DANGER
+                t().danger
             } else {
-                MUTED
+                t().muted
             };
             frame.render_widget(
                 Paragraph::new(msg)
-                    .style(Style::default().fg(color).bg(PANEL_BG))
+                    .style(Style::default().fg(color).bg(t().panel_bg))
                     .alignment(Alignment::Center)
                     .wrap(Wrap { trim: false }),
                 inner,
@@ -1979,9 +2014,9 @@ impl App {
     fn render_telemetry(&self, frame: &mut Frame, area: Rect, phase: f32) {
         let block = Block::default()
             .title(" TELEMETRY ")
-            .title_style(Style::default().fg(CYAN).bold())
+            .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(TEAL));
+            .border_style(Style::default().fg(t().accent3));
         frame.render_widget(block, area);
         let inner = area.inner(Margin {
             horizontal: 1,
@@ -1990,69 +2025,71 @@ impl App {
 
         let lines = vec![
             Line::from(vec![
-                Span::styled("provider: ", Style::default().fg(AMBER).bold()),
+                Span::styled("provider: ", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     self.provider.name(),
                     Style::default().fg(self.provider.color()),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("status:   ", Style::default().fg(AMBER).bold()),
+                Span::styled("status:   ", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     if self.pending_ai {
                         "awaiting model response"
                     } else {
                         "terminal steady"
                     },
-                    Style::default().fg(ICE),
+                    Style::default().fg(t().text),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("shell:    ", Style::default().fg(AMBER).bold()),
-                Span::styled(&self.last_shell_status, Style::default().fg(ICE)),
+                Span::styled("shell:    ", Style::default().fg(t().accent2).bold()),
+                Span::styled(&self.last_shell_status, Style::default().fg(t().text)),
             ]),
             Line::from(vec![
-                Span::styled("3d fx:    ", Style::default().fg(AMBER).bold()),
+                Span::styled("3d fx:    ", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     if self.effects.active {
                         self.effects.kind.name()
                     } else {
                         "offline"
                     },
-                    Style::default().fg(if self.effects.active { CYAN } else { MUTED }),
+                    Style::default().fg(if self.effects.active { t().accent4 } else { t().muted }),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("webcam:   ", Style::default().fg(AMBER).bold()),
+                Span::styled("webcam:   ", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     if self.webcam.is_some() { "active" } else { "offline" },
-                    Style::default().fg(if self.webcam.is_some() { TEAL } else { MUTED }),
+                    Style::default().fg(if self.webcam.is_some() { t().accent3 } else { t().muted }),
                 ),
             ]),
         ];
 
         frame.render_widget(
             Paragraph::new(Text::from(lines))
-                .style(Style::default().bg(PANEL_ALT))
+                .style(Style::default().bg(t().panel_alt))
                 .wrap(Wrap { trim: false }),
             inner,
         );
 
-        let eq_area = Rect {
-            x: inner.x,
-            y: inner.y + inner.height.saturating_sub(2),
-            width: inner.width,
-            height: 2,
-        };
-        render_equalizer(frame.buffer_mut(), eq_area, phase);
+        if inner.height > 7 {
+            let eq_area = Rect {
+                x: inner.x,
+                y: inner.y + inner.height.saturating_sub(2),
+                width: inner.width,
+                height: 2.min(inner.height.saturating_sub(5)),
+            };
+            render_equalizer(frame.buffer_mut(), eq_area, phase);
+        }
     }
 
     fn render_ops_panel(&self, frame: &mut Frame, area: Rect, phase: f32) {
         let block = Block::default()
             .title(" OPS DECK ")
-            .title_style(Style::default().fg(COPPER).bold())
+            .title_style(Style::default().fg(t().accent1).bold())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
         let inner = area.inner(Margin {
             horizontal: 1,
@@ -2062,31 +2099,31 @@ impl App {
         let mut lines = vec![
             Line::from(Span::styled(
                 "!<cmd>         raw shell",
-                Style::default().fg(ICE),
+                Style::default().fg(t().text),
             )),
             Line::from(Span::styled(
                 "/server <port> host video chat",
-                Style::default().fg(ICE),
+                Style::default().fg(t().text),
             )),
             Line::from(Span::styled(
                 "/connect <url> join video chat",
-                Style::default().fg(ICE),
+                Style::default().fg(t().text),
             )),
             Line::from(Span::styled(
                 "/webcam /3d /fx /analytics",
-                Style::default().fg(ICE),
+                Style::default().fg(t().text),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "recent ops:",
-                Style::default().fg(AMBER).bold(),
+                Style::default().fg(t().accent2).bold(),
             )),
         ];
 
         if self.recent_commands.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  none yet",
-                Style::default().fg(MUTED),
+                Style::default().fg(t().muted),
             )));
         } else {
             for command in &self.recent_commands {
@@ -2095,29 +2132,29 @@ impl App {
                         "  {}",
                         truncate(command, inner.width.saturating_sub(4) as usize)
                     ),
-                    Style::default().fg(CYAN),
+                    Style::default().fg(t().accent4),
                 )));
             }
         }
 
         frame.render_widget(
             Paragraph::new(Text::from(lines))
-                .style(Style::default().bg(PANEL_BG))
+                .style(Style::default().bg(t().panel_bg))
                 .wrap(Wrap { trim: false }),
             inner,
         );
 
         let pulse_x = inner.x + inner.width.saturating_sub(8);
-        render_starburst(frame.buffer_mut(), pulse_x, inner.y + 1, 2, phase * 1.7);
+        render_starburst(frame.buffer_mut(), pulse_x, inner.y + 1, 2, phase * 1.7, Some(inner));
     }
 
     fn render_videochat_feeds(&self, frame: &mut Frame, area: Rect, _phase: f32) {
         let block = Block::default()
             .title(" VIDEO CHAT // LIVE FEEDS ")
-            .title_style(Style::default().fg(AMBER).bold())
+            .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -2135,13 +2172,13 @@ impl App {
                         inner.x + 1,
                         inner.y,
                         &format!("{} (you)", self.username),
-                        CYAN,
-                        ICE,
+                        t().accent4,
+                        t().text,
                     );
                 } else {
                     frame.render_widget(
                         Paragraph::new("waiting for video feeds...")
-                            .style(Style::default().fg(MUTED).bg(PANEL_BG))
+                            .style(Style::default().fg(t().muted).bg(t().panel_bg))
                             .alignment(Alignment::Center),
                         inner,
                     );
@@ -2184,8 +2221,8 @@ impl App {
                                 cell_area.x + 1,
                                 cell_area.y,
                                 &label,
-                                if is_self { TEAL } else { CYAN },
-                                ICE,
+                                if is_self { t().accent3 } else { t().accent4 },
+                                t().text,
                             );
                         }
                     }
@@ -2194,7 +2231,7 @@ impl App {
         } else {
             frame.render_widget(
                 Paragraph::new("not connected. use /server <port> or /connect ws://<addr>")
-                    .style(Style::default().fg(MUTED).bg(PANEL_BG))
+                    .style(Style::default().fg(t().muted).bg(t().panel_bg))
                     .alignment(Alignment::Center),
                 inner,
             );
@@ -2204,9 +2241,9 @@ impl App {
     fn render_videochat_messages(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .title(" CHAT STREAM ")
-            .title_style(Style::default().fg(CYAN).bold())
+            .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(TEAL));
+            .border_style(Style::default().fg(t().accent3));
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -2222,33 +2259,33 @@ impl App {
             for (uname, content) in msgs.iter().skip(start) {
                 let is_sys = uname == "SYSTEM";
                 let color = if is_sys {
-                    MUTED
+                    t().muted
                 } else if uname == &self.username {
-                    TEAL
+                    t().accent3
                 } else {
-                    CYAN
+                    t().accent4
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{}: ", uname), Style::default().fg(color).bold()),
-                    Span::styled(content.as_str(), Style::default().fg(ICE)),
+                    Span::styled(content.as_str(), Style::default().fg(t().text)),
                 ]));
             }
             if lines.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "no messages yet. use /chat <msg>",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(t().muted),
                 )));
             }
             frame.render_widget(
                 Paragraph::new(Text::from(lines))
                     .wrap(Wrap { trim: false })
-                    .style(Style::default().bg(PANEL_BG)),
+                    .style(Style::default().bg(t().panel_bg)),
                 inner,
             );
         } else {
             frame.render_widget(
                 Paragraph::new("offline")
-                    .style(Style::default().fg(MUTED).bg(PANEL_BG))
+                    .style(Style::default().fg(t().muted).bg(t().panel_bg))
                     .alignment(Alignment::Center),
                 inner,
             );
@@ -2258,9 +2295,9 @@ impl App {
     fn render_videochat_users(&self, frame: &mut Frame, area: Rect, phase: f32) {
         let block = Block::default()
             .title(" CONNECTED USERS ")
-            .title_style(Style::default().fg(AMBER).bold())
+            .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -2273,14 +2310,14 @@ impl App {
             let status = vc.get_status();
             let mut lines = vec![
                 Line::from(vec![
-                    Span::styled("status: ", Style::default().fg(AMBER).bold()),
-                    Span::styled(status, Style::default().fg(ICE)),
+                    Span::styled("status: ", Style::default().fg(t().accent2).bold()),
+                    Span::styled(status, Style::default().fg(t().text)),
                 ]),
             ];
             if users.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "  no users yet",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(t().muted),
                 )));
             } else {
                 for u in users.iter() {
@@ -2289,16 +2326,16 @@ impl App {
                     lines.push(Line::from(vec![
                         Span::styled(
                             format!("  [{}] ", indicator),
-                            Style::default().fg(if is_self { TEAL } else { CYAN }),
+                            Style::default().fg(if is_self { t().accent3 } else { t().accent4 }),
                         ),
                         Span::styled(
                             u.as_str(),
                             Style::default()
-                                .fg(if is_self { TEAL } else { ICE })
+                                .fg(if is_self { t().accent3 } else { t().text })
                                 .bold(),
                         ),
                         if is_self {
-                            Span::styled(" (you)", Style::default().fg(MUTED))
+                            Span::styled(" (you)", Style::default().fg(t().muted))
                         } else {
                             Span::raw("")
                         },
@@ -2308,13 +2345,13 @@ impl App {
             frame.render_widget(
                 Paragraph::new(Text::from(lines))
                     .wrap(Wrap { trim: false })
-                    .style(Style::default().bg(PANEL_BG)),
+                    .style(Style::default().bg(t().panel_bg)),
                 inner,
             );
         } else {
             frame.render_widget(
                 Paragraph::new("offline")
-                    .style(Style::default().fg(MUTED).bg(PANEL_BG))
+                    .style(Style::default().fg(t().muted).bg(t().panel_bg))
                     .alignment(Alignment::Center),
                 inner,
             );
@@ -2324,9 +2361,9 @@ impl App {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .title(" TRANSMIT ")
-            .title_style(Style::default().fg(CYAN).bold())
+            .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(TEAL))
+            .border_style(Style::default().fg(t().accent3))
             .border_type(BorderType::Double);
         frame.render_widget(block, area);
 
@@ -2353,7 +2390,7 @@ impl App {
             "READY"
         };
         let status_color = if self.pending_approval.is_some() {
-            AMBER
+            t().accent2
         } else {
             self.provider.color()
         };
@@ -2364,30 +2401,30 @@ impl App {
         });
         let lines = vec![
             Line::from(vec![
-                Span::styled("> ", Style::default().fg(CYAN).bold()),
+                Span::styled("> ", Style::default().fg(t().accent4).bold()),
                 Span::styled(
                     if self.input.is_empty() {
                         "prompt, !bash, @file, /trust, /remember, /pin, /webcam, /3d ..."
                     } else {
                         self.input.as_str()
                     },
-                    Style::default().fg(ICE),
+                    Style::default().fg(t().text),
                 ),
-                Span::styled("_", Style::default().fg(AMBER).bold()),
+                Span::styled("_", Style::default().fg(t().accent2).bold()),
             ]),
             Line::from(vec![
-                Span::styled("mode: ", Style::default().fg(AMBER).bold()),
+                Span::styled("mode: ", Style::default().fg(t().accent2).bold()),
                 Span::styled(status, Style::default().fg(status_color)),
                 Span::styled(
-                    format!("  |  {}  |  F1 help  F2 ai  F4 3D  F5 cam  F6 layout  Ctrl+hjkl tile", trust_tag),
-                    Style::default().fg(MUTED),
+                    format!("  |  {}  |  F1 help  F2 ai  F4 3D  F5 cam  F6 layout  F9 theme  Ctrl+hjkl tile", trust_tag),
+                    Style::default().fg(t().muted),
                 ),
             ]),
         ];
 
         frame.render_widget(
             Paragraph::new(Text::from(lines))
-                .style(Style::default().bg(PANEL_ALT))
+                .style(Style::default().bg(t().panel_alt))
                 .wrap(Wrap { trim: false }),
             inner,
         );
@@ -2398,43 +2435,43 @@ impl App {
         frame.render_widget(Clear, popup);
         let block = Block::default()
             .title(" HELP // ASCIIVISION v2 OPERATIONS MANUAL ")
-            .title_style(Style::default().fg(COPPER).bold())
+            .title_style(Style::default().fg(t().accent1).bold())
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, popup);
 
         let text = Text::from(vec![
             Line::from(vec![
-                Span::styled("PROMPTS    ", Style::default().fg(AMBER).bold()),
-                Span::styled("plain text goes to the active AI provider", Style::default().fg(ICE)),
+                Span::styled("PROMPTS    ", Style::default().fg(t().accent2).bold()),
+                Span::styled("plain text goes to the active AI provider", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
-                Span::styled("SHELL      ", Style::default().fg(AMBER).bold()),
-                Span::styled("prefix with ! to execute locally: !ls, !git status, !curl ...", Style::default().fg(ICE)),
+                Span::styled("SHELL      ", Style::default().fg(t().accent2).bold()),
+                Span::styled("prefix with ! to execute locally: !ls, !git status, !curl ...", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
-                Span::styled("VIDEO CHAT ", Style::default().fg(AMBER).bold()),
-                Span::styled("/server <port>, /connect ws://<addr>, /chat <msg>", Style::default().fg(ICE)),
+                Span::styled("VIDEO CHAT ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/server <port>, /connect ws://<addr>, /chat <msg>", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
-                Span::styled("WEBCAM     ", Style::default().fg(AMBER).bold()),
-                Span::styled("/webcam or F5 to toggle live ASCII webcam feed", Style::default().fg(ICE)),
+                Span::styled("WEBCAM     ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/webcam or F5 to toggle live ASCII webcam feed", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
-                Span::styled("3D EFFECTS ", Style::default().fg(AMBER).bold()),
-                Span::styled("/3d, /fx, F4 toggle, F7 cycle (matrix, plasma, starfield, wireframe, fire, particles)", Style::default().fg(ICE)),
+                Span::styled("3D EFFECTS ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/3d, /fx, F4 toggle, F7 cycle (matrix, plasma, starfield, wireframe, fire, particles)", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
-                Span::styled("ANALYTICS  ", Style::default().fg(AMBER).bold()),
-                Span::styled("/analytics or F6 for live conversation stats dashboard", Style::default().fg(ICE)),
+                Span::styled("ANALYTICS  ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/analytics or F6 for live conversation stats dashboard", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
-                Span::styled("SHORTCUTS  ", Style::default().fg(AMBER).bold()),
-                Span::styled("/curl, /brew, /provider, /video, /clear, /help, /username", Style::default().fg(ICE)),
+                Span::styled("SHORTCUTS  ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/curl, /brew, /provider, /video, /clear, /help, /username", Style::default().fg(t().text)),
             ]),
             Line::from(""),
-            Line::from(Span::styled("Keyboard", Style::default().fg(CYAN).bold())),
+            Line::from(Span::styled("Keyboard", Style::default().fg(t().accent4).bold())),
             Line::from("  F1       toggle this overlay"),
             Line::from("  F2       cycle AI provider (Claude, Grok, GPT-5, Gemini)"),
             Line::from("  F3       toggle live video panel"),
@@ -2443,11 +2480,13 @@ impl App {
             Line::from("  F6       cycle tiling layout preset"),
             Line::from("  F7       cycle 3D effect type"),
             Line::from("  F8       cycle focused tile panel type"),
+            Line::from("  F9       randomize color theme"),
+            Line::from("  F10      reset theme to defaults"),
             Line::from("  Ctrl+L   clear transcript"),
             Line::from("  PgUp/Dn  scroll transcript"),
             Line::from("  Esc      exit"),
             Line::from(""),
-            Line::from(Span::styled("Tiling (Hyprland-style)", Style::default().fg(CYAN).bold())),
+            Line::from(Span::styled("Tiling (Hyprland-style)", Style::default().fg(t().accent4).bold())),
             Line::from("  Ctrl+h/l  focus tile left/right"),
             Line::from("  Ctrl+j/k  focus tile down/up"),
             Line::from("  Ctrl+H/L  swap tile left/right (shift)"),
@@ -2456,7 +2495,7 @@ impl App {
             Line::from("  Ctrl+n    cycle focused tile to next panel type"),
             Line::from("  /layout  cycle layout (default, dual, triple, quad, webcam, focus)"),
             Line::from(""),
-            Line::from(Span::styled("Modules", Style::default().fg(CYAN).bold())),
+            Line::from(Span::styled("Modules", Style::default().fg(t().accent4).bold())),
             Line::from("  AI Chat: Claude 4.5, Grok 4, GPT-5, Gemini 2.5 Pro"),
             Line::from("  Video: MP4 ASCII playback | Webcam: Live camera ASCII feed"),
             Line::from("  Video Chat: WebSocket multi-user streaming"),
@@ -2469,7 +2508,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
-                .style(Style::default().fg(ICE).bg(PANEL_BG)),
+                .style(Style::default().fg(t().text).bg(t().panel_bg)),
             popup.inner(Margin {
                 horizontal: 2,
                 vertical: 1,
@@ -2597,21 +2636,12 @@ fn render_background(buffer: &mut Buffer, area: Rect, phase: f32) {
         let band = (((y as f32 * 0.23) + phase * 1.6).sin() * 0.5 + 0.5) * 0.26;
         for x in area.x..area.x + area.width {
             let noise = hash32(x, y, (phase * 33.0) as u32);
-            let base = mix_color(BG_BASE, BG_ALT, band + ((noise & 0x07) as f32 / 90.0));
+            let base = mix_color(t().bg_base, t().bg_alt, band + ((noise & 0x07) as f32 / 90.0));
             if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.reset();
+                cell.set_char(' ');
                 cell.set_bg(base);
-                cell.set_fg(mix_color(MUTED, ICE, ((noise & 0x0f) as f32) / 42.0));
-
-                let sparkle = noise % 173 == 0;
-                let embers = y % 3 == 0 && noise % 97 == 0;
-                if sparkle {
-                    cell.set_char(if noise % 2 == 0 { '.' } else { '*' });
-                } else if embers {
-                    cell.set_char(if noise % 3 == 0 { '\'' } else { '`' });
-                    cell.set_fg(mix_color(COPPER, CYAN, ((x + y) % 9) as f32 / 9.0));
-                } else {
-                    cell.set_char(' ');
-                }
+                cell.set_fg(base);
             }
         }
     }
@@ -2631,30 +2661,39 @@ fn render_raster_bars(buffer: &mut Buffer, area: Rect, phase: f32) {
             let x = area.x + 3 + offset;
             let blend = (offset as f32 / width.max(1) as f32 + phase * 0.06).fract();
             if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_bg(mix_color(PANEL_ALT, BG_ALT, 0.4));
+                cell.set_bg(mix_color(t().panel_alt, t().bg_alt, 0.4));
                 cell.set_char('\u{2584}');
-                cell.set_fg(mix_color(COPPER, CYAN, blend));
+                cell.set_fg(mix_color(t().accent1, t().accent4, blend));
             }
         }
     }
 }
 
 fn render_logo(buffer: &mut Buffer, x: u16, y: u16, lines: &[&str], phase: f32) {
+    let buf_area = *buffer.area();
+    let max_x = buf_area.x + buf_area.width;
+    let max_y = buf_area.y + buf_area.height;
     for (row, line) in lines.iter().enumerate() {
         for (column, glyph) in line.chars().enumerate() {
             if glyph == ' ' {
                 continue;
             }
-
-            if let Some(shadow) = buffer.cell_mut((x + column as u16 + 1, y + row as u16 + 1)) {
-                shadow.set_char(glyph);
-                shadow.set_fg(Color::Rgb(37, 18, 10));
+            let sx = x.saturating_add(column as u16 + 1);
+            let sy = y.saturating_add(row as u16 + 1);
+            if sx < max_x && sy < max_y {
+                if let Some(shadow) = buffer.cell_mut((sx, sy)) {
+                    shadow.set_char(glyph);
+                    shadow.set_fg(Color::Rgb(37, 18, 10));
+                }
             }
-
-            let blend = ((column as f32 / line.len().max(1) as f32) + phase * 0.07).fract();
-            if let Some(cell) = buffer.cell_mut((x + column as u16, y + row as u16)) {
-                cell.set_char(glyph);
-                cell.set_fg(mix_color(COPPER, AMBER, blend));
+            let px = x.saturating_add(column as u16);
+            let py = y.saturating_add(row as u16);
+            if px < max_x && py < max_y {
+                let blend = ((column as f32 / line.len().max(1) as f32) + phase * 0.07).fract();
+                if let Some(cell) = buffer.cell_mut((px, py)) {
+                    cell.set_char(glyph);
+                    cell.set_fg(mix_color(t().accent1, t().accent2, blend));
+                }
             }
         }
     }
@@ -2664,12 +2703,13 @@ fn render_logo(buffer: &mut Buffer, x: u16, y: u16, lines: &[&str], phase: f32) 
         x + 40.min(18),
         y + lines.len() as u16 + 1,
         "CLI // AI + OPS + VIDEO + WEBCAM + 3D + CHAT + ANALYTICS",
-        CYAN,
-        ICE,
+        t().accent4,
+        t().text,
     );
 }
 
-fn render_starburst(buffer: &mut Buffer, center_x: u16, center_y: u16, radius: u16, phase: f32) {
+fn render_starburst(buffer: &mut Buffer, center_x: u16, center_y: u16, radius: u16, phase: f32, clip: Option<Rect>) {
+    let clip_area = clip.unwrap_or(*buffer.area());
     let rays = 12;
     for ray in 0..rays {
         let angle = phase * 0.45 + ray as f32 * std::f32::consts::TAU / rays as f32;
@@ -2679,27 +2719,46 @@ fn render_starburst(buffer: &mut Buffer, center_x: u16, center_y: u16, radius: u
             let dy = angle.sin() * step as f32 * 0.55;
             let x = center_x as i16 + dx.round() as i16;
             let y = center_y as i16 + dy.round() as i16;
-            if x < 0 || y < 0 {
+            if x < clip_area.x as i16 || y < clip_area.y as i16
+                || x >= (clip_area.x + clip_area.width) as i16
+                || y >= (clip_area.y + clip_area.height) as i16
+            {
                 continue;
             }
             if let Some(cell) = buffer.cell_mut((x as u16, y as u16)) {
                 let blend = step as f32 / dynamic.max(1.0);
                 cell.set_char(if step < radius / 2 { '*' } else { '+' });
-                cell.set_fg(mix_color(COPPER, AMBER, blend));
+                cell.set_fg(mix_color(t().accent1, t().accent2, blend));
             }
         }
     }
 
-    if let Some(cell) = buffer.cell_mut((center_x, center_y)) {
-        cell.set_char('@');
-        cell.set_fg(AMBER);
+    if center_x >= clip_area.x && center_x < clip_area.x + clip_area.width
+        && center_y >= clip_area.y && center_y < clip_area.y + clip_area.height
+    {
+        if let Some(cell) = buffer.cell_mut((center_x, center_y)) {
+            cell.set_char('@');
+            cell.set_fg(t().accent2);
+        }
     }
 }
 
 fn render_gradient_text(buffer: &mut Buffer, x: u16, y: u16, text: &str, start: Color, end: Color) {
+    let buf_area = *buffer.area();
+    if y < buf_area.y || y >= buf_area.y + buf_area.height {
+        return;
+    }
+    let max_x = buf_area.x + buf_area.width;
     let length = text.chars().count().max(1);
     for (index, glyph) in text.chars().enumerate() {
-        if let Some(cell) = buffer.cell_mut((x + index as u16, y)) {
+        let px = x.saturating_add(index as u16);
+        if px >= max_x {
+            break;
+        }
+        if px < buf_area.x {
+            continue;
+        }
+        if let Some(cell) = buffer.cell_mut((px, y)) {
             cell.set_char(glyph);
             cell.set_fg(mix_color(start, end, index as f32 / length as f32));
         }
@@ -2720,7 +2779,7 @@ fn render_equalizer(buffer: &mut Buffer, area: Rect, phase: f32) {
             let y = area.y + area.height - 1 - step;
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.set_char('\u{2588}');
-                cell.set_fg(mix_color(COPPER, CYAN, i as f32 / columns.max(1) as f32));
+                cell.set_fg(mix_color(t().accent1, t().accent4, i as f32 / columns.max(1) as f32));
             }
         }
     }
@@ -2735,7 +2794,7 @@ fn render_synthetic_scope(buffer: &mut Buffer, area: Rect, phase: f32) {
         }
         if let Some(cell) = buffer.cell_mut((area.x + x, y)) {
             cell.set_char('*');
-            cell.set_fg(mix_color(COPPER, CYAN, x as f32 / area.width.max(1) as f32));
+            cell.set_fg(mix_color(t().accent1, t().accent4, x as f32 / area.width.max(1) as f32));
         }
     }
 
@@ -2772,7 +2831,7 @@ fn render_scroller(buffer: &mut Buffer, area: Rect, text: &str, phase: f32, acce
             cell.set_bg(Color::Rgb(9, 16, 24));
             cell.set_fg(mix_color(
                 accent,
-                ICE,
+                t().text,
                 index as f32 / area.width.max(1) as f32,
             ));
         }
@@ -2888,11 +2947,25 @@ async fn run_app(
     }
 
     loop {
-        terminal.draw(|frame| app.render(frame))?;
         if app.handle_input()? {
             break;
         }
         app.tick();
+        // detect mode transitions (intro->chat) and force full terminal redraw
+        if app.mode != app.prev_mode {
+            app.prev_mode = app.mode.clone();
+            // 1) physically clear the terminal screen via raw ANSI
+            execute!(
+                terminal.backend_mut(),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                crossterm::cursor::MoveTo(0, 0)
+            )?;
+            // 2) reset ratatui's back buffer so next draw() diffs against blank
+            terminal.clear()?;
+            // 3) immediately draw the new mode's first frame
+            terminal.draw(|frame| app.render(frame))?;
+        }
+        terminal.draw(|frame| app.render(frame))?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
 
@@ -2906,11 +2979,36 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // suppress ALL FFmpeg log output before anything else --
+    // FFmpeg writes to stderr which corrupts the TUI display
+    unsafe { ffmpeg_sys_next::av_log_set_level(ffmpeg_sys_next::AV_LOG_QUIET) };
+
+    // redirect stderr to /dev/null so nothing can corrupt the TUI
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Ok(devnull) = std::fs::File::open("/dev/null") {
+            extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
+            unsafe { dup2(devnull.as_raw_fd(), 2); }
+        }
+    }
+
+    // request a large terminal window before entering raw mode
+    // \x1b[8;rows;colst resizes the terminal on macOS Terminal.app, iTerm2, etc.
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[8;58;200t");
+        let _ = out.flush();
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     let result = run_app(&mut terminal, args).await;
 

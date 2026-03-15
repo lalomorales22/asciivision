@@ -469,19 +469,17 @@ fn render_wireframe_cube(buffer: &mut Buffer, area: Rect, phase: f32) {
         })
         .collect();
 
+    use crate::theme::{t, color_to_rgb};
+    let th = t();
+    let c1 = color_to_rgb(th.accent3);
+    let c2 = color_to_rgb(th.accent4);
+    let c3 = color_to_rgb(th.accent1);
+    let c4 = color_to_rgb(th.accent2);
+    let c5 = color_to_rgb(th.text);
     let edge_colors = [
-        (54, 154, 158),
-        (118, 214, 226),
-        (214, 153, 104),
-        (241, 189, 105),
-        (54, 154, 158),
-        (118, 214, 226),
-        (214, 153, 104),
-        (241, 189, 105),
-        (207, 230, 232),
-        (207, 230, 232),
-        (207, 230, 232),
-        (207, 230, 232),
+        c1, c2, c3, c4,
+        c1, c2, c3, c4,
+        c5, c5, c5, c5,
     ];
 
     for (i, &(a, b)) in edges.iter().enumerate() {

@@ -128,6 +128,8 @@ fn open_decoder(
     Option<(u32, u32)>,
 )> {
     ff::init().context("init ffmpeg")?;
+    // suppress all FFmpeg log output -- it writes to stderr and corrupts the TUI
+    unsafe { ffmpeg_sys_next::av_log_set_level(ffmpeg_sys_next::AV_LOG_QUIET) };
     let input =
         ff::format::input(path).with_context(|| format!("open input {}", path.display()))?;
     let stream = input
@@ -176,7 +178,8 @@ fn spawn_decode(
     let (tx, rx) = bounded(8);
     let (target_width, target_height) = decode_size;
 
-    std::thread::spawn(move || -> Result<()> {
+    std::thread::spawn(move || {
+        let _result: Result<()> = (|| {
         let (mut input, video_index, mut decoder, (src_width, src_height), _) =
             open_decoder(path.as_path())?;
         let mut scaler = build_scaler(
@@ -211,6 +214,7 @@ fn spawn_decode(
 
         finished.store(true, Ordering::Relaxed);
         Ok(())
+        })(); // end inner closure -- errors are silently swallowed, never printed to stderr
     });
 
     Ok(rx)

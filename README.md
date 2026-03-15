@@ -24,6 +24,7 @@ ASCIIVision is a single Rust binary that packs an absurd amount of functionality
 - **Context Management** -- automatic summarization of older messages when the context window fills up, @-file injection, pinnable messages, persistent agent memory across sessions
 - **SQLite Persistence** -- all conversations and agent memory saved to `~/.config/asciivision/conversations.db`
 - **Cracktro Intro** -- animated boot sequence with starburst effects, raster bars, and scrolling ticker
+- **Dynamic Theme Engine** -- global color theme system with HSL-based random palette generation. F9 randomizes all UI colors on the fly, F10 resets to defaults. Every panel, border, accent, and background color is driven by the live theme.
 
 Legacy companion apps (mega-cli, mega-analytics) are preserved in the `archive/` directory.
 
@@ -118,6 +119,8 @@ Options:
 | `F6` | Cycle tiling layout preset |
 | `F7` | Cycle 3D effect type |
 | `F8` | Cycle focused tile's panel type |
+| `F9` | Randomize color theme |
+| `F10` | Reset theme to defaults |
 | `Ctrl+L` | Clear transcript |
 | `Ctrl+C` | Exit |
 | `Esc` | Exit (if input empty) / Clear input (if typing) |
@@ -127,17 +130,17 @@ Options:
 
 | Key | Action |
 |-----|--------|
-| `Alt+h` | Focus tile to the left |
-| `Alt+l` | Focus tile to the right |
-| `Alt+k` | Focus tile above |
-| `Alt+j` | Focus tile below |
-| `Alt+H` | Swap focused tile left (Shift) |
-| `Alt+L` | Swap focused tile right (Shift) |
-| `Alt+K` | Swap focused tile up (Shift) |
-| `Alt+J` | Swap focused tile down (Shift) |
-| `Alt+[` | Shrink focused split |
-| `Alt+]` | Grow focused split |
-| `Alt+n` | Cycle focused tile to next panel type |
+| `Ctrl+h` | Focus tile to the left |
+| `Ctrl+l` | Focus tile to the right |
+| `Ctrl+k` | Focus tile above |
+| `Ctrl+j` | Focus tile below |
+| `Ctrl+H` | Swap focused tile left (Shift) |
+| `Ctrl+L` | Swap focused tile right (Shift) |
+| `Ctrl+K` | Swap focused tile up (Shift) |
+| `Ctrl+J` | Swap focused tile down (Shift) |
+| `Ctrl+[` | Shrink focused split |
+| `Ctrl+]` | Grow focused split |
+| `Ctrl+n` | Cycle focused tile to next panel type |
 
 The focused tile is highlighted with a double border.
 
@@ -164,6 +167,8 @@ The focused tile is highlighted with a double border.
 | `/chat <msg>` | Send message in video chat |
 | `/username <name>` | Set your video chat username |
 | `/clear` | Clear transcript |
+| `/randomize` | Randomize all UI colors |
+| `/theme reset` | Restore default color palette |
 | `/help` | Toggle help overlay |
 
 ---
@@ -172,11 +177,11 @@ The focused tile is highlighted with a double border.
 
 | Preset | Description |
 |--------|-------------|
-| **Default** | Transcript (55%) + Video/Webcam/Telemetry+SysMon/Ops stacked right |
-| **Dual Pane** | Transcript (50%) + Webcam/SysMon stacked |
-| **Triple Column** | Three columns: transcript, video+telemetry, webcam+sysmon+ops |
-| **Quad** | 2x2 grid: transcript, video, webcam, sysmon+ops |
-| **Webcam Focus** | Webcam gets 70% of the right side, transcript+sysmon left |
+| **Default** | Transcript (55%) + Video/3D Effects side-by-side top, Webcam/Telemetry+SysMon/Ops stacked right |
+| **Dual Pane** | Transcript (50%) + 3D Effects/Webcam/SysMon stacked right |
+| **Triple Column** | Three columns: transcript, video+3D effects, webcam+sysmon+ops |
+| **Quad** | 2x2-ish grid: transcript, video, 3D effects, webcam+sysmon |
+| **Webcam Focus** | Webcam top-right, 3D Effects below it, transcript+sysmon left |
 | **Full Focus** | Single full-screen transcript |
 
 Every tile can be reassigned to any of 11 panel types: Transcript, Video, Webcam, Telemetry, Ops Deck, 3D Effects, Analytics, Video Chat Feeds, Video Chat Messages, Video Chat Users, or System Monitor.
@@ -261,7 +266,8 @@ asciivision/
 │   ├── webcam.rs        # Live webcam capture with ASCII conversion + error reporting
 │   ├── shell.rs         # Async shell command execution with timeout
 │   ├── db.rs            # SQLite conversation persistence
-│   ├── tiling.rs        # Binary-tree tiling window manager with 6 presets
+│   ├── tiling.rs        # Binary-tree tiling window manager with 6 presets + min-size enforcement
+│   ├── theme.rs         # Global dynamic color theme engine with HSL random palette generation
 │   ├── sysmon.rs        # System monitor (CPU, memory, network, load)
 │   ├── effects.rs       # 3D terminal effects engine (6 effects, rainbow matrix)
 │   ├── analytics.rs     # Conversation analytics dashboard with bar charts

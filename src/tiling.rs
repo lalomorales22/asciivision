@@ -114,8 +114,11 @@ impl TileNode {
         result
     }
 
+    const MIN_W: u16 = 10;
+    const MIN_H: u16 = 5;
+
     fn compute_rects_inner(&self, area: Rect, out: &mut Vec<(usize, PanelKind, Rect)>) {
-        if area.width < 2 || area.height < 2 {
+        if area.width < Self::MIN_W || area.height < Self::MIN_H {
             return;
         }
         match self {
@@ -129,8 +132,26 @@ impl TileNode {
                 second,
             } => {
                 let (a1, a2) = split_rect(area, *direction, *ratio);
-                first.compute_rects_inner(a1, out);
-                second.compute_rects_inner(a2, out);
+                let a1_ok = a1.width >= Self::MIN_W && a1.height >= Self::MIN_H;
+                let a2_ok = a2.width >= Self::MIN_W && a2.height >= Self::MIN_H;
+                match (a1_ok, a2_ok) {
+                    (true, true) => {
+                        first.compute_rects_inner(a1, out);
+                        second.compute_rects_inner(a2, out);
+                    }
+                    (true, false) => {
+                        // give all space to first child
+                        first.compute_rects_inner(area, out);
+                    }
+                    (false, true) => {
+                        // give all space to second child
+                        second.compute_rects_inner(area, out);
+                    }
+                    (false, false) => {
+                        // area too small for split, give it all to first
+                        first.compute_rects_inner(area, out);
+                    }
+                }
             }
         }
     }
@@ -263,13 +284,17 @@ impl TilingManager {
         self.next_id = 0;
         self.tree = match preset {
             LayoutPreset::Default => {
-                // [Transcript 55% | V[ Video 35% / Webcam 20% / V[ Telemetry / SysMon ] 22% / Ops 23% ]]
+                // [Transcript 55% | V[ Video/Effects3D 35% / Webcam 20% / V[ Telemetry / SysMon ] 22% / Ops 23% ]]
                 TileNode::hsplit(
                     0.55,
                     self.make_leaf(PanelKind::Transcript),
                     TileNode::vsplit(
                         0.35,
-                        self.make_leaf(PanelKind::Video),
+                        TileNode::hsplit(
+                            0.55,
+                            self.make_leaf(PanelKind::Video),
+                            self.make_leaf(PanelKind::Effects3D),
+                        ),
                         TileNode::vsplit(
                             0.30,
                             self.make_leaf(PanelKind::Webcam),
@@ -290,9 +315,13 @@ impl TilingManager {
                 0.50,
                 self.make_leaf(PanelKind::Transcript),
                 TileNode::vsplit(
-                    0.50,
-                    self.make_leaf(PanelKind::Webcam),
-                    self.make_leaf(PanelKind::SystemMonitor),
+                    0.34,
+                    self.make_leaf(PanelKind::Effects3D),
+                    TileNode::vsplit(
+                        0.50,
+                        self.make_leaf(PanelKind::Webcam),
+                        self.make_leaf(PanelKind::SystemMonitor),
+                    ),
                 ),
             ),
             LayoutPreset::TripleColumn => TileNode::hsplit(
@@ -301,9 +330,9 @@ impl TilingManager {
                 TileNode::hsplit(
                     0.50,
                     TileNode::vsplit(
-                        0.60,
+                        0.50,
                         self.make_leaf(PanelKind::Video),
-                        self.make_leaf(PanelKind::Telemetry),
+                        self.make_leaf(PanelKind::Effects3D),
                     ),
                     TileNode::vsplit(
                         0.40,
@@ -324,12 +353,12 @@ impl TilingManager {
                     self.make_leaf(PanelKind::Video),
                 ),
                 TileNode::hsplit(
-                    0.50,
-                    self.make_leaf(PanelKind::Webcam),
+                    0.34,
+                    self.make_leaf(PanelKind::Effects3D),
                     TileNode::hsplit(
                         0.50,
+                        self.make_leaf(PanelKind::Webcam),
                         self.make_leaf(PanelKind::SystemMonitor),
-                        self.make_leaf(PanelKind::OpsDeck),
                     ),
                 ),
             ),
@@ -341,12 +370,16 @@ impl TilingManager {
                     self.make_leaf(PanelKind::SystemMonitor),
                 ),
                 TileNode::vsplit(
-                    0.70,
+                    0.55,
                     self.make_leaf(PanelKind::Webcam),
-                    TileNode::hsplit(
+                    TileNode::vsplit(
                         0.50,
-                        self.make_leaf(PanelKind::Telemetry),
-                        self.make_leaf(PanelKind::OpsDeck),
+                        self.make_leaf(PanelKind::Effects3D),
+                        TileNode::hsplit(
+                            0.50,
+                            self.make_leaf(PanelKind::Telemetry),
+                            self.make_leaf(PanelKind::OpsDeck),
+                        ),
                     ),
                 ),
             ),

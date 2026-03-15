@@ -4,13 +4,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
-const AMBER: Color = Color::Rgb(241, 189, 105);
-const COPPER: Color = Color::Rgb(214, 153, 104);
-const TEAL: Color = Color::Rgb(54, 154, 158);
-const CYAN: Color = Color::Rgb(118, 214, 226);
-const ICE: Color = Color::Rgb(207, 230, 232);
-const MUTED: Color = Color::Rgb(101, 121, 134);
-const PANEL_BG: Color = Color::Rgb(6, 13, 19);
+use crate::theme::t;
 
 pub struct AnalyticsPanel {
     pub active: bool,
@@ -78,10 +72,10 @@ impl AnalyticsPanel {
     pub fn render(&self, frame: &mut Frame, area: Rect, phase: f32) {
         let block = Block::default()
             .title(" ANALYTICS DASHBOARD ")
-            .title_style(Style::default().fg(AMBER).bold())
+            .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(COPPER));
+            .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -98,47 +92,47 @@ impl AnalyticsPanel {
 
             let bar_width = inner.width.saturating_sub(22) as usize;
             let total = stats.total_messages.max(1);
-            let user_bar = make_bar(stats.user_messages, total, bar_width, CYAN);
-            let ai_bar = make_bar(stats.assistant_messages, total, bar_width, TEAL);
-            let shell_bar = make_bar(stats.shell_commands, total, bar_width, COPPER);
+            let user_bar = make_bar(stats.user_messages, total, bar_width, t().accent4);
+            let ai_bar = make_bar(stats.assistant_messages, total, bar_width, t().accent3);
+            let shell_bar = make_bar(stats.shell_commands, total, bar_width, t().accent1);
 
             let mut lines = vec![
                 Line::from(vec![
-                    Span::styled("TOTAL MSGS:  ", Style::default().fg(AMBER).bold()),
+                    Span::styled("TOTAL MSGS:  ", Style::default().fg(t().accent2).bold()),
                     Span::styled(
                         format!("{}", stats.total_messages),
-                        Style::default().fg(ICE),
+                        Style::default().fg(t().text),
                     ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("USER:        ", Style::default().fg(AMBER).bold()),
+                    Span::styled("USER:        ", Style::default().fg(t().accent2).bold()),
                     Span::styled(
                         format!("{:>5}  ", stats.user_messages),
-                        Style::default().fg(ICE),
+                        Style::default().fg(t().text),
                     ),
                 ]),
                 Line::from(user_bar),
                 Line::from(vec![
-                    Span::styled("AI:          ", Style::default().fg(AMBER).bold()),
+                    Span::styled("AI:          ", Style::default().fg(t().accent2).bold()),
                     Span::styled(
                         format!("{:>5}  ", stats.assistant_messages),
-                        Style::default().fg(ICE),
+                        Style::default().fg(t().text),
                     ),
                 ]),
                 Line::from(ai_bar),
                 Line::from(vec![
-                    Span::styled("SHELL:       ", Style::default().fg(AMBER).bold()),
+                    Span::styled("SHELL:       ", Style::default().fg(t().accent2).bold()),
                     Span::styled(
                         format!("{:>5}  ", stats.shell_commands),
-                        Style::default().fg(ICE),
+                        Style::default().fg(t().text),
                     ),
                 ]),
                 Line::from(shell_bar),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("PROVIDERS:   ", Style::default().fg(AMBER).bold()),
-                    Span::styled(provider_str, Style::default().fg(ICE)),
+                    Span::styled("PROVIDERS:   ", Style::default().fg(t().accent2).bold()),
+                    Span::styled(provider_str, Style::default().fg(t().text)),
                 ]),
             ];
 
@@ -148,20 +142,20 @@ impl AnalyticsPanel {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("[{}] live analytics feed", spinner),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(t().muted),
                 ),
             ]));
 
             frame.render_widget(
                 Paragraph::new(Text::from(lines))
                     .wrap(Wrap { trim: false })
-                    .style(Style::default().bg(PANEL_BG)),
+                    .style(Style::default().bg(t().panel_bg)),
                 inner,
             );
         } else {
             frame.render_widget(
                 Paragraph::new("analytics offline: no database connection")
-                    .style(Style::default().fg(MUTED).bg(PANEL_BG))
+                    .style(Style::default().fg(t().muted).bg(t().panel_bg))
                     .alignment(Alignment::Center),
                 inner,
             );

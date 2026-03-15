@@ -5,15 +5,7 @@ use ratatui::{
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};
 use std::time::Instant;
 
-const AMBER: Color = Color::Rgb(241, 189, 105);
-#[allow(dead_code)]
-const COPPER: Color = Color::Rgb(214, 153, 104);
-const TEAL: Color = Color::Rgb(54, 154, 158);
-const CYAN: Color = Color::Rgb(118, 214, 226);
-const ICE: Color = Color::Rgb(207, 230, 232);
-const DANGER: Color = Color::Rgb(225, 92, 84);
-const MUTED: Color = Color::Rgb(101, 121, 134);
-const PANEL_BG: Color = Color::Rgb(6, 13, 19);
+use crate::theme::t;
 
 pub struct SystemMonitor {
     sys: System,
@@ -89,10 +81,10 @@ impl SystemMonitor {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, phase: f32, is_focused: bool) {
-        let border_color = if is_focused { CYAN } else { TEAL };
+        let border_color = if is_focused { t().accent4 } else { t().accent3 };
         let block = Block::default()
             .title(" SYS MONITOR ")
-            .title_style(Style::default().fg(AMBER).bold())
+            .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
             .border_type(if is_focused {
                 BorderType::Double
@@ -115,14 +107,14 @@ impl SystemMonitor {
 
         // CPU
         let cpu_color = if self.cpu_usage > 80.0 {
-            DANGER
+            t().danger
         } else if self.cpu_usage > 50.0 {
-            AMBER
+            t().accent2
         } else {
-            TEAL
+            t().accent3
         };
         lines.push(Line::from(vec![
-            Span::styled("CPU  ", Style::default().fg(AMBER).bold()),
+            Span::styled("CPU  ", Style::default().fg(t().accent2).bold()),
             Span::styled(
                 format!("{:5.1}%  ", self.cpu_usage),
                 Style::default().fg(cpu_color),
@@ -143,7 +135,7 @@ impl SystemMonitor {
                 .collect();
             lines.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
-                Span::styled(sparks, Style::default().fg(CYAN)),
+                Span::styled(sparks, Style::default().fg(t().accent4)),
             ]));
         }
 
@@ -154,14 +146,14 @@ impl SystemMonitor {
             0.0
         };
         let mem_color = if mem_pct > 0.85 {
-            DANGER
+            t().danger
         } else if mem_pct > 0.65 {
-            AMBER
+            t().accent2
         } else {
-            TEAL
+            t().accent3
         };
         lines.push(Line::from(vec![
-            Span::styled("MEM  ", Style::default().fg(AMBER).bold()),
+            Span::styled("MEM  ", Style::default().fg(t().accent2).bold()),
             Span::styled(
                 format!(
                     "{:>5}/{:<5} ",
@@ -180,53 +172,53 @@ impl SystemMonitor {
         if self.swap_total > 0 {
             let swap_pct = self.swap_used as f32 / self.swap_total as f32;
             lines.push(Line::from(vec![
-                Span::styled("SWAP ", Style::default().fg(AMBER).bold()),
+                Span::styled("SWAP ", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     format!(
                         "{:>5}/{:<5} ",
                         fmt_bytes(self.swap_used),
                         fmt_bytes(self.swap_total)
                     ),
-                    Style::default().fg(if swap_pct > 0.5 { DANGER } else { ICE }),
+                    Style::default().fg(if swap_pct > 0.5 { t().danger } else { t().text }),
                 ),
                 Span::styled(
                     mini_bar(swap_pct, inner.width.saturating_sub(20) as usize),
-                    Style::default().fg(if swap_pct > 0.5 { DANGER } else { MUTED }),
+                    Style::default().fg(if swap_pct > 0.5 { t().danger } else { t().muted }),
                 ),
             ]));
         }
 
         // Network
         lines.push(Line::from(vec![
-            Span::styled("NET  ", Style::default().fg(AMBER).bold()),
+            Span::styled("NET  ", Style::default().fg(t().accent2).bold()),
             Span::styled(
                 format!(
                     "\u{2191}{} \u{2193}{}",
                     fmt_bytes(self.net_tx_bytes),
                     fmt_bytes(self.net_rx_bytes),
                 ),
-                Style::default().fg(CYAN),
+                Style::default().fg(t().accent4),
             ),
         ]));
 
         // Load average
         lines.push(Line::from(vec![
-            Span::styled("LOAD ", Style::default().fg(AMBER).bold()),
+            Span::styled("LOAD ", Style::default().fg(t().accent2).bold()),
             Span::styled(
                 format!(
                     "{:.2}  {:.2}  {:.2}",
                     self.load_avg[0], self.load_avg[1], self.load_avg[2]
                 ),
-                Style::default().fg(ICE),
+                Style::default().fg(t().text),
             ),
         ]));
 
         // Cores
         lines.push(Line::from(vec![
-            Span::styled("CORE ", Style::default().fg(AMBER).bold()),
+            Span::styled("CORE ", Style::default().fg(t().accent2).bold()),
             Span::styled(
                 format!("{} threads", self.cpu_per_core.len()),
-                Style::default().fg(ICE),
+                Style::default().fg(t().text),
             ),
         ]));
 
@@ -238,7 +230,7 @@ impl SystemMonitor {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} sampling", spinner),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(t().muted),
                 ),
             ]));
         }
@@ -246,7 +238,7 @@ impl SystemMonitor {
         frame.render_widget(
             Paragraph::new(Text::from(lines))
                 .wrap(Wrap { trim: false })
-                .style(Style::default().bg(PANEL_BG)),
+                .style(Style::default().bg(t().panel_bg)),
             inner,
         );
     }
