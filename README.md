@@ -32,23 +32,54 @@ Legacy companion apps (mega-cli, mega-analytics) are preserved in the `archive/`
 
 ## Quick Start
 
-### Prerequisites
+### One-Line Install (Recommended)
 
-- **Rust** (stable)
+The install script handles everything -- Rust, FFmpeg, LLVM, building, and adding `asciivision` to your PATH:
+
+```bash
+git clone https://github.com/lalomorales22/asciivision.git
+cd asciivision
+./install.sh
+```
+
+After installation, run from anywhere:
+
+```bash
+asciivision
+```
+
+**Supported platforms:** macOS (Homebrew), Ubuntu/Debian, Fedora/RHEL, Arch Linux, openSUSE.
+**Windows users:** Install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) first (`wsl --install` in PowerShell), then run the commands above inside your WSL terminal.
+
+### Manual Setup
+
+If you prefer to install dependencies yourself:
+
+#### Prerequisites
+
+- **Rust** 1.70+ ([rustup.rs](https://rustup.rs))
 - **FFmpeg** dev libraries
+- **LLVM/libclang** (needed to compile ffmpeg-sys-next)
+- **pkg-config**
 
 ```bash
 # macOS
-brew install ffmpeg
+brew install ffmpeg llvm pkg-config
 
 # Ubuntu/Debian
-sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev pkg-config
+sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libavdevice-dev pkg-config libclang-dev build-essential
+
+# Fedora (enable RPM Fusion first)
+sudo dnf install ffmpeg-devel clang-devel pkg-config gcc
+
+# Arch
+sudo pacman -S ffmpeg clang pkg-config base-devel
 ```
 
-### Build & Run
+#### Build & Run
 
 ```bash
-# From the repo root
+# From the repo root (auto-builds + runs)
 ./asciivision
 
 # Or manually
@@ -56,9 +87,15 @@ cargo build --release
 ./target/release/gpt5-asciivision
 ```
 
-### API Keys
+### API Keys (Optional)
 
 Copy `.env.example` to `.env` in the repo root and fill in your keys:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env`:
 
 ```
 CLAUDE_API_KEY=sk-ant-...
@@ -67,7 +104,7 @@ OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
 ```
 
-Only the providers you want to use need keys. The app works without any keys (shell, video, webcam, effects, tiling, sysmon all work standalone).
+Only the providers you want to use need keys. The app works without any keys -- shell, video, webcam, effects, tiling, and sysmon all work standalone.
 
 ---
 
@@ -87,7 +124,7 @@ Cycle between providers with F2 or `/provider <name>`.
 ## CLI Flags
 
 ```
-gpt5-asciivision [OPTIONS]
+asciivision [OPTIONS]
 
 Options:
   --provider <NAME>          AI provider: claude, grok, gpt, gemini [default: claude]
@@ -233,10 +270,10 @@ Host a server and connect clients for multi-user live ASCII webcam streaming in 
 
 ```bash
 # Machine A: host the server
-./target/release/gpt5-asciivision --serve 8080
+asciivision --serve 8080
 
 # Machine B: connect as a client
-./target/release/gpt5-asciivision --connect ws://192.168.1.100:8080 --username alice --webcam
+asciivision --connect ws://192.168.1.100:8080 --username alice --webcam
 ```
 
 Or use slash commands at runtime:
@@ -254,6 +291,7 @@ The video chat panel shows up to 4 remote feeds in a grid, a chat stream, and a 
 
 ```
 asciivision/
+├── install.sh           # One-line installer (deps + build + PATH setup)
 ├── asciivision          # Launcher script (builds + runs)
 ├── Cargo.toml           # Main crate dependencies
 ├── .env.example         # API key template (copy to .env)
@@ -296,9 +334,9 @@ asciivision/
 
 ## Requirements
 
-- macOS, Linux, or Windows
+- macOS, Linux, or Windows (via WSL2)
 - Terminal with RGB color support (iTerm2, Kitty, Alacritty, WezTerm, etc.)
-- Rust 1.70+
-- FFmpeg 4.0+ (for video/webcam features)
 - A webcam (optional, for webcam/video chat features)
 - Only one app can use the webcam at a time on macOS -- close OBS/Zoom/FaceTime before enabling webcam capture
+
+All build dependencies (Rust, FFmpeg, LLVM) are installed automatically by `./install.sh`.
