@@ -71,7 +71,7 @@ Create a mini shader system where each effect is a function `(x, y, time, resolu
 ### Video Compositing
 
 Layer multiple video sources with blend modes:
-- Webcam feed with a matrix rain overlay (multiply blend)
+- Webcam feed with a rain overlay (multiply blend)
 - MP4 background with the AI chat transcript overlaid semi-transparently
 - Picture-in-picture: small webcam in the corner of the video panel
 - Chroma key: replace a solid-color background in the webcam feed with an effect or video

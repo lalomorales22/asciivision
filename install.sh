@@ -311,7 +311,7 @@ build_project() {
 install_binary() {
     mkdir -p "${INSTALL_DIR}"
 
-    local bin_src="${SCRIPT_DIR}/target/release/gpt5-asciivision"
+    local bin_src="${SCRIPT_DIR}/target/release/asciivision"
 
     if [[ ! -f "${bin_src}" ]]; then
         err "Build artifact not found at ${bin_src}"

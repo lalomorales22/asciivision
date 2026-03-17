@@ -31,6 +31,7 @@ mod shell;
 mod sysmon;
 mod theme;
 mod tiling;
+mod tiles;
 mod tools;
 mod video;
 mod webcam;
@@ -49,6 +50,7 @@ use server::VideoChatServer;
 use shell::{format_outcome, run as run_shell, ShellOutcome};
 use sysmon::SystemMonitor;
 use tiling::{LayoutPreset, PanelKind, TilingManager};
+use tiles::TilesPanel;
 use tools::{ToolCall, ToolResult, TrustLevel};
 use video::VideoPlayer;
 use theme::t;
@@ -74,7 +76,7 @@ const SMALL_LOGO: &[&str] = &[
 ];
 
 const SCROLLER_TEXT: &str =
-    " ASCIIVISION v2.0 // AI DEMOZONE // LIVE VIDEO CHAT // WEBCAM ASCII // 3D EFFECTS ENGINE // !bash !curl !brew // F2 MODEL // F3 VIDEO // F4 3D FX // F5 WEBCAM // F6 ANALYTICS // F7 CYCLE FX // CTRL+L PURGE // THIS TERMINAL HAS LEFT THE BUILDING ";
+    " ASCIIVISION v2.0 // AI DEMOZONE // LIVE VIDEO CHAT // WEBCAM ASCII // 3D EFFECTS ENGINE // TRUE PTY TILES // !bash !curl !brew // F2 MODEL // F3 VIDEO // F4 FX CYCLE // F5 WEBCAM // F6 LAYOUT // F7 TILES // CTRL+L PURGE // THIS TERMINAL HAS LEFT THE BUILDING ";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -239,6 +241,7 @@ struct App {
     // new modules
     effects: EffectsEngine,
     games: GamesPanel,
+    tiles: TilesPanel,
     analytics: AnalyticsPanel,
     tiling: TilingManager,
     sysmon: SystemMonitor,
@@ -407,6 +410,7 @@ impl App {
 
             effects,
             games: GamesPanel::new(),
+            tiles: TilesPanel::new(),
             analytics: AnalyticsPanel::new(),
             tiling: TilingManager::new(),
             sysmon: SystemMonitor::new(),
@@ -437,7 +441,7 @@ impl App {
             "shell deck armed: use !<command> for bash, or /curl and /brew for shortcuts",
         );
         app.add_system_message(format!(
-            "provider uplink live: {} // F2 rotate // F4 3D fx // F5 webcam // F7 cycle fx",
+            "provider uplink live: {} // F2 rotate // F4 fx cycle // F5 webcam // F7 tiles",
             app.provider_display_name()
         ));
         app.add_system_message(format!(
@@ -452,6 +456,9 @@ impl App {
         );
         app.add_system_message(
             "games bay online: /games to load the arcade panel, 1-3 to launch, WASD to play when that tile is focused"
+        );
+        app.add_system_message(
+            "tiles online: /tiles or F7 boots live PTY terminals // /tiles 4 for a 2x2 shell grid"
         );
         app.add_system_message(
             "tiling: Ctrl+hjkl focus, Ctrl+Shift+hjkl swap, Ctrl+[/] resize, Ctrl+n cycle panel, /layout cycle preset"
@@ -1123,6 +1130,16 @@ impl App {
             return Ok(false);
         }
 
+        if self.pending_approval.is_none()
+            && self.input.is_empty()
+            && self.tiling.focused_panel() == Some(PanelKind::Tiles)
+            && self.should_route_key_to_tiles(key)
+            && self.tiles.handle_key(key)
+        {
+            self.status_note = self.tiles.status_note().to_string();
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Esc => {
                 if self.pending_approval.is_some() {
@@ -1164,9 +1181,9 @@ impl App {
                 };
             }
             KeyCode::F(4) => {
-                self.effects.active = !self.effects.active;
+                self.effects.cycle_with_off();
                 self.status_note = if self.effects.active {
-                    format!("3D fx online: {}", self.effects.kind.name())
+                    format!("3D fx: {}", self.effects.kind.name())
                 } else {
                     "3D fx offline".to_string()
                 };
@@ -1196,12 +1213,15 @@ impl App {
                 self.status_note = format!("layout: {}", preset.name());
             }
             KeyCode::F(7) => {
-                self.effects.cycle();
-                if self.effects.active {
-                    self.status_note = format!("3D fx: {}", self.effects.kind.name());
-                } else {
-                    self.effects.active = true;
-                    self.status_note = format!("3D fx online: {}", self.effects.kind.name());
+                match self.tiles.activate_default() {
+                    Ok(()) => {
+                        self.tiling.set_focused_panel(PanelKind::Tiles);
+                        self.status_note = self.tiles.status_note().to_string();
+                    }
+                    Err(error) => {
+                        self.add_system_message(format!("tiles error: {}", error));
+                        self.status_note = "tiles failed to boot".to_string();
+                    }
                 }
             }
             KeyCode::F(8) => {
@@ -1276,6 +1296,35 @@ impl App {
         }
 
         Ok(false)
+    }
+
+    fn should_route_key_to_tiles(&self, key: KeyEvent) -> bool {
+        if matches!(key.code, KeyCode::F(_)) {
+            return false;
+        }
+
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return true;
+        }
+
+        // Ctrl+j/k goes to tiles for inner terminal cycling
+        if matches!(key.code, KeyCode::Char('j') | KeyCode::Char('k')) {
+            return true;
+        }
+
+        // Block Ctrl+h/l (outer focus), Ctrl+Shift (swap), Ctrl+n, Ctrl+[/]
+        !matches!(
+            key.code,
+            KeyCode::Char('h')
+                | KeyCode::Char('l')
+                | KeyCode::Char('H')
+                | KeyCode::Char('J')
+                | KeyCode::Char('K')
+                | KeyCode::Char('L')
+                | KeyCode::Char('n')
+                | KeyCode::Char('[')
+                | KeyCode::Char(']')
+        )
     }
 
     fn dispatch_input(&mut self, input: String) {
@@ -1357,9 +1406,12 @@ impl App {
         }
 
         if input == "/fx" {
-            self.effects.cycle();
-            self.effects.active = true;
-            self.add_system_message(format!("3D effect: {}", self.effects.kind.name()));
+            self.effects.cycle_with_off();
+            if self.effects.active {
+                self.add_system_message(format!("3D effect: {}", self.effects.kind.name()));
+            } else {
+                self.add_system_message("3D effects offline");
+            }
             return;
         }
 
@@ -1419,6 +1471,43 @@ impl App {
         if input == "/games" {
             self.tiling.set_focused_panel(PanelKind::Games);
             self.status_note = self.games.status_note().to_string();
+            return;
+        }
+
+        if input == "/tiles" {
+            match self.tiles.activate_count(2) {
+                Ok(()) => {
+                    self.tiling.set_focused_panel(PanelKind::Tiles);
+                    self.status_note = self.tiles.status_note().to_string();
+                }
+                Err(error) => {
+                    self.add_system_message(format!("tiles error: {}", error));
+                    self.status_note = "tiles failed to boot".to_string();
+                }
+            }
+            return;
+        }
+
+        if let Some(rest) = input.strip_prefix("/tiles ") {
+            let rest = rest.trim();
+            let count = match rest.parse::<usize>() {
+                Ok(count @ 1..=8) => count,
+                _ => {
+                    self.add_system_message("tiles: /tiles or /tiles <1-8>");
+                    return;
+                }
+            };
+
+            match self.tiles.activate_count(count) {
+                Ok(()) => {
+                    self.tiling.set_focused_panel(PanelKind::Tiles);
+                    self.status_note = self.tiles.status_note().to_string();
+                }
+                Err(error) => {
+                    self.add_system_message(format!("tiles error: {}", error));
+                    self.status_note = "tiles failed to boot".to_string();
+                }
+            }
             return;
         }
 
@@ -2130,6 +2219,7 @@ impl App {
         match panel {
             PanelKind::Transcript => self.render_messages_tile(frame, area, is_focused),
             PanelKind::Games => self.games.render(frame, area, phase, is_focused),
+            PanelKind::Tiles => self.tiles.render(frame, area, is_focused),
             PanelKind::Video => self.render_video_panel(frame, area, phase),
             PanelKind::Webcam => self.render_webcam_panel(frame, area, phase),
             PanelKind::Telemetry => self.render_telemetry(frame, area, phase),
@@ -2151,7 +2241,7 @@ impl App {
                     self.effects.render(frame.buffer_mut(), inner, phase);
                 } else {
                     frame.render_widget(
-                        Paragraph::new("F4 to activate // F7 cycle effect")
+                        Paragraph::new("F4 to cycle effects (includes off)")
                             .style(Style::default().fg(t().muted).bg(t().panel_bg))
                             .alignment(Alignment::Center),
                         inner,
@@ -2529,7 +2619,7 @@ impl App {
                 Style::default().fg(t().text),
             )),
             Line::from(Span::styled(
-                "/webcam /3d /fx /analytics /games",
+                "/webcam /3d /fx /analytics /games /tiles [1-8]",
                 Style::default().fg(t().text),
             )),
             Line::from(Span::styled(
@@ -2831,7 +2921,7 @@ impl App {
                 Span::styled("> ", Style::default().fg(t().accent4).bold()),
                 Span::styled(
                     if self.input.is_empty() {
-                        "prompt, !bash, @file, /ollama, /games, /trust, /remember ..."
+                        "prompt, !bash, @file, /ollama, /games, /tiles, /trust, /remember ..."
                     } else {
                         self.input.as_str()
                     },
@@ -2843,7 +2933,7 @@ impl App {
                 Span::styled("mode: ", Style::default().fg(t().accent2).bold()),
                 Span::styled(status, Style::default().fg(status_color)),
                 Span::styled(
-                    format!("  |  {}  |  F1 help  F2 ai  F4 3D  F5 cam  F6 layout  F8 panel  /games arcade", trust_tag),
+                    format!("  |  {}  |  F1 help  F2 ai  F4 fx  F5 cam  F6 layout  F7 tiles  F8 panel", trust_tag),
                     Style::default().fg(t().muted),
                 ),
             ]),
@@ -3001,29 +3091,33 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("3D EFFECTS ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/3d, /fx, F4 toggle, F7 cycle (matrix, plasma, starfield, wireframe, fire, particles)", Style::default().fg(t().text)),
+                Span::styled("/3d toggles, /fx or F4 cycle matrix -> plasma -> starfield -> wireframe -> fire -> particles -> off", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
                 Span::styled("ANALYTICS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/analytics or F6 for live conversation stats dashboard", Style::default().fg(t().text)),
+                Span::styled("/analytics opens the live conversation stats dashboard", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
                 Span::styled("GAMES      ", Style::default().fg(t().accent2).bold()),
                 Span::styled("/games loads the arcade panel; 1-3 launches Pac-Man, Space Invaders, or 3D Penguin", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
+                Span::styled("TILES      ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/tiles or /tiles <1-8> boots real PTY terminals inside a focused tile; Ctrl+j/k cycle inner terminals, Ctrl+h/l move app focus", Style::default().fg(t().text)),
+            ]),
+            Line::from(vec![
                 Span::styled("SHORTCUTS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/curl, /brew, /provider, /ollama, /video, /youtube, /clear, /help, /username, /games", Style::default().fg(t().text)),
+                Span::styled("/curl, /brew, /provider, /ollama, /video, /youtube, /clear, /help, /username, /games, /tiles", Style::default().fg(t().text)),
             ]),
             Line::from(""),
             Line::from(Span::styled("Keyboard", Style::default().fg(t().accent4).bold())),
             Line::from("  F1       toggle this overlay"),
             Line::from("  F2       cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama)"),
             Line::from("  F3       toggle live video panel"),
-            Line::from("  F4       toggle 3D effects overlay"),
+            Line::from("  F4       cycle 3D effects, then off, then repeat"),
             Line::from("  F5       toggle webcam capture"),
             Line::from("  F6       cycle tiling layout preset"),
-            Line::from("  F7       cycle 3D effect type"),
+            Line::from("  F7       boot/focus the Tiles PTY panel"),
             Line::from("  F8       cycle focused tile panel type"),
             Line::from("  F9       randomize color theme"),
             Line::from("  F10      reset theme to defaults"),
@@ -3040,6 +3134,7 @@ impl App {
             Line::from("  Ctrl+n    cycle focused tile to next panel type"),
             Line::from("  /layout  cycle layout (default, dual, triple, quad, webcam, focus)"),
             Line::from("  Games     focus arcade tile and use 1-3 / WASD / Esc / R"),
+            Line::from("  Tiles     focus PTY tile and type directly; Ctrl+j/k cycle inner terminals, Ctrl+h/l move app focus"),
             Line::from(""),
             Line::from(Span::styled("Modules", Style::default().fg(t().accent4).bold())),
             Line::from("  AI Chat: Claude 4.5, Grok 4, GPT-5, Gemini 3 Flash, local Ollama models"),
@@ -3047,6 +3142,7 @@ impl App {
             Line::from("  Video Chat: WebSocket multi-user streaming"),
             Line::from("  3D FX: matrix, plasma, starfield, wireframe, fire, particles"),
             Line::from("  Games: Pac-Man, Space Invaders, 3D Penguin"),
+            Line::from("  Tiles: 1-8 live PTY terminals for codex / claude / gemini / shell work"),
             Line::from("  Sys Monitor: CPU, memory, swap, network, load average"),
             Line::from("  Analytics: Real-time conversation statistics"),
             Line::from("  Shell: Full bash, curl, brew integration"),

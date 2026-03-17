@@ -103,4 +103,4 @@ case "${OS}" in
 esac
 
 cargo build --release
-exec ./target/release/gpt5-asciivision "$@"
+exec ./target/release/asciivision "$@"

@@ -84,8 +84,24 @@ impl EffectsEngine {
         }
     }
 
-    pub fn cycle(&mut self) {
+    pub fn cycle_with_off(&mut self) {
+        if !self.active {
+            self.active = true;
+            self.reset_buffers();
+            return;
+        }
+
+        if matches!(self.kind, EffectKind::Particles) {
+            self.active = false;
+            self.reset_buffers();
+            return;
+        }
+
         self.kind = self.kind.cycle();
+        self.reset_buffers();
+    }
+
+    fn reset_buffers(&mut self) {
         self.matrix_columns.clear();
         self.stars.clear();
         self.particles.clear();

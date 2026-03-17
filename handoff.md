@@ -102,7 +102,7 @@ cargo build --release # release build
 ./asciivision        # launcher script (builds + runs)
 
 # useful test flags
-./target/debug/gpt5-asciivision --skip-intro --no-video --no-db
+./target/debug/asciivision --skip-intro --no-video --no-db
 ```
 
 To reproduce the glitch: run the app, then drag the terminal window narrower/wider. Watch the TRANSCRIPT panel -- content will jump around and potentially scroll off-screen. Also try cycling layouts with F6 at different window sizes.

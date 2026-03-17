@@ -1,5 +1,5 @@
 [package]
-name = "gpt5-asciivision"
+name = "asciivision"
 version = "0.1.0"
 edition = "2021"
 
@@ -26,3 +26,5 @@ chrono = "0.4"
 rand = "0.8"
 sysinfo = "0.33"
 tokio-stream = "0.1"
+portable-pty = "0.9"
+vt100 = { package = "vt100-ctt", version = "0.17.1", default-features = false }

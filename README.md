@@ -18,6 +18,7 @@ ASCIIVision is a single Rust binary that packs an absurd amount of functionality
 - **Live Webcam** -- your camera feed converted to ASCII art in real-time, with error reporting when the device is busy
 - **WebSocket Video Chat** -- host or join multi-user live ASCII video chat rooms
 - **3D Terminal Effects** -- rainbow matrix rain, plasma fields, 3D starfield, wireframe rotating cube, fire simulation, particle storms
+- **Tiles Window** -- real PTY-backed embedded terminals for Codex, Claude, Gemini, shells, and any other CLI app, in 1-8 way grids
 - **Hyprland-Style Tiling** -- move, swap, resize, and reassign panels with Ctrl+hjkl keybindings and 6 layout presets
 - **Games Window** -- playable Pac-Man, Space Invaders, and 3D Penguin inside a focused tile with selector + WASD controls
 - **System Monitor** -- live CPU, memory, swap, network I/O, load average, per-core sparklines
@@ -92,7 +93,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 # Or manually
 cargo build --release
-./target/release/gpt5-asciivision
+./target/release/asciivision
 ```
 
 ### API Keys (Optional)
@@ -160,10 +161,10 @@ Options:
 | `F1` | Help overlay |
 | `F2` | Cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama) |
 | `F3` | Toggle video panel |
-| `F4` | Toggle 3D effects overlay |
+| `F4` | Cycle 3D effects, then off, then repeat |
 | `F5` | Toggle webcam capture |
 | `F6` | Cycle tiling layout preset |
-| `F7` | Cycle 3D effect type |
+| `F7` | Boot/focus the Tiles PTY panel |
 | `F8` | Cycle focused tile's panel type |
 | `F9` | Randomize color theme |
 | `F10` | Reset theme to defaults |
@@ -206,10 +207,12 @@ The focused tile is highlighted with a double border.
 | `/youtube <url>` | Resolve and stream a YouTube video into the video panel using `yt-dlp` |
 | `/webcam` | Toggle webcam |
 | `/3d` or `/effects` | Toggle 3D effects |
-| `/fx` | Cycle to next 3D effect |
+| `/fx` | Cycle 3D effects, then off |
 | `/analytics` | Show analytics in focused tile |
 | `/games` | Show the games panel in the focused tile |
 | `/games <pacman|space|penguin>` | Launch a specific game in the games panel |
+| `/tiles` | Boot the Tiles panel with 2 live embedded terminals |
+| `/tiles <1-8>` | Set the Tiles panel to a specific live terminal count |
 | `/sysmon` | Show system monitor in focused tile |
 | `/layout` | Cycle layout preset |
 | `/layout <name>` | Set layout: default, dual, triple, quad, webcam, focus |
@@ -239,7 +242,7 @@ Ollama model selection is populated from the local machine at runtime. ASCIIVisi
 | **Webcam Focus** | Webcam top-right, 3D Effects below it, transcript+sysmon left |
 | **Full Focus** | Single full-screen transcript |
 
-Every tile can be reassigned to any of 12 panel types: Transcript, Games, Video, Webcam, Telemetry, Ops Deck, 3D Effects, Analytics, Video Chat Feeds, Video Chat Messages, Video Chat Users, or System Monitor.
+Every tile can be reassigned to any of 13 panel types: Transcript, Games, Tiles, Video, Webcam, Telemetry, Ops Deck, 3D Effects, Analytics, Video Chat Feeds, Video Chat Messages, Video Chat Users, or System Monitor.
 
 ---
 
@@ -254,9 +257,21 @@ Focus a tile and press `F8` or `Ctrl+n` until it becomes `GAMES`, or run `/games
 
 ---
 
+## Tiles Window
+
+Focus a tile and press `F8` or `Ctrl+n` until it becomes `TILES`, press `F7`, or run `/tiles`.
+
+- **Default Layout** -- `/tiles` boots 2 live terminals side-by-side
+- **Custom Counts** -- `/tiles 4` creates a 2x2 shell grid, and any count from `1` to `8` is supported
+- **Real PTYs** -- each inner tile is a real terminal session, so you can launch `codex`, `claude`, `gemini`, or any other CLI tool directly inside it
+- **Inner Focus** -- `Ctrl+j/k` cycles between inner terminals (next/previous)
+- **Outer Focus** -- `Ctrl+h/l` moves between ASCIIVision panels (left/right), so you can jump back to chat or another module
+
+---
+
 ## 3D Effects
 
-Six terminal-rendered visual effects, cycled with F7 or `/fx`:
+Six terminal-rendered visual effects, cycled with `F4` or `/fx`, then turned off on the next cycle:
 
 1. **Rainbow Matrix Rain** -- cascading characters with per-column rainbow hues that drift over time, white head glow, color-tinted backgrounds
 2. **Plasma Field** -- RGB sine-wave interference patterns with smooth color cycling

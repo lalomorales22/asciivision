@@ -4,6 +4,7 @@ use ratatui::prelude::*;
 pub enum PanelKind {
     Transcript,
     Games,
+    Tiles,
     Video,
     Webcam,
     Telemetry,
@@ -21,6 +22,7 @@ impl PanelKind {
         match self {
             Self::Transcript => "TRANSCRIPT",
             Self::Games => "GAMES",
+            Self::Tiles => "TILES",
             Self::Video => "VIDEO BUS",
             Self::Webcam => "WEBCAM",
             Self::Telemetry => "TELEMETRY",
@@ -37,7 +39,8 @@ impl PanelKind {
     pub fn cycle_next(self) -> Self {
         match self {
             Self::Transcript => Self::Games,
-            Self::Games => Self::Video,
+            Self::Games => Self::Tiles,
+            Self::Tiles => Self::Video,
             Self::Video => Self::Webcam,
             Self::Webcam => Self::Telemetry,
             Self::Telemetry => Self::OpsDeck,
