@@ -10,7 +10,7 @@
 
 ASCIIVision is a single Rust binary that packs an absurd amount of functionality into your terminal:
 
-- **Multi-AI Chat** -- Claude Haiku 4.5, Grok 4 Fast, GPT-5 Nano, Gemini 3 Flash with live provider switching
+- **Multi-AI Chat** -- Claude Haiku 4.5, Grok 4 Fast, GPT-5 Nano, Gemini 3 Flash, and local Ollama models with live provider switching
 - **Streaming Responses** -- AI responses appear character-by-character in real-time via SSE streaming (Claude, OpenAI, Grok), with seamless tool-use handoff mid-stream
 - **Agentic Tool Use** -- AI can autonomously execute shell commands, read/write files, search codebases, make HTTP requests, and query system info with configurable approval gates
 - **Shell Execution** -- run any bash command inline with `!<cmd>`, plus `/curl` and `/brew` shortcuts
@@ -35,7 +35,7 @@ Legacy companion apps (mega-cli, mega-analytics) are preserved in the `archive/`
 
 ### One-Line Install (Recommended)
 
-The install script handles everything -- Rust, FFmpeg, LLVM, `yt-dlp`, building, and adding `asciivision` to your PATH:
+The install script handles everything -- Rust, FFmpeg, LLVM, `yt-dlp`, Ollama, building, and adding `asciivision` to your PATH:
 
 ```bash
 git clone https://github.com/lalomorales22/asciivision.git
@@ -65,10 +65,11 @@ If you prefer to install dependencies yourself:
 - **LLVM/libclang** (needed to compile ffmpeg-sys-next)
 - **pkg-config**
 - **yt-dlp** (for `/youtube`)
+- **Ollama** (for local model routing)
 
 ```bash
 # macOS
-brew install ffmpeg llvm pkg-config yt-dlp
+brew install ffmpeg llvm pkg-config yt-dlp ollama
 
 # Ubuntu/Debian
 sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libavdevice-dev pkg-config libclang-dev build-essential yt-dlp
@@ -78,6 +79,9 @@ sudo dnf install ffmpeg-devel clang-devel pkg-config gcc yt-dlp
 
 # Arch
 sudo pacman -S ffmpeg clang pkg-config base-devel yt-dlp
+
+# Ollama (Linux / WSL2 manual install)
+curl -fsSL https://ollama.com/install.sh | sh
 ```
 
 #### Build & Run
@@ -108,7 +112,7 @@ OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
 ```
 
-Only the providers you want to use need keys. The app works without any keys -- shell, video, webcam, effects, tiling, and sysmon all work standalone.
+Only the providers you want to use need keys. The app works without any keys -- shell, video, webcam, effects, tiling, sysmon, and local Ollama routing all work standalone.
 
 ---
 
@@ -120,8 +124,9 @@ Only the providers you want to use need keys. The app works without any keys -- 
 | xAI | `grok-4-fast-non-reasoning` | Grok 4 Fast |
 | OpenAI | `gpt-5-nano` | GPT-5 Nano |
 | Google | `gemini-3-flash-preview` | Gemini 3 Flash |
+| Ollama | installed models on this machine | Numbered local model picker |
 
-Cycle between providers with F2 or `/provider <name>`.
+Cycle between providers with F2 or `/provider <name>`. When you land on Ollama, ASCIIVision queries your local installed models and opens a numbered picker. Type the model number and press Enter to route chat into that model.
 
 ---
 
@@ -131,7 +136,7 @@ Cycle between providers with F2 or `/provider <name>`.
 asciivision [OPTIONS]
 
 Options:
-  --provider <NAME>          AI provider: claude, grok, gpt, gemini [default: claude]
+  --provider <NAME>          AI provider: claude, grok, gpt, gemini, ollama [default: claude]
   --background-video <PATH>  MP4 file for the video panel
   --intro-video <PATH>       MP4 file for the intro sequence
   --skip-intro               Jump straight to the command deck
@@ -153,7 +158,7 @@ Options:
 | Key | Action |
 |-----|--------|
 | `F1` | Help overlay |
-| `F2` | Cycle AI provider |
+| `F2` | Cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama) |
 | `F3` | Toggle video panel |
 | `F4` | Toggle 3D effects overlay |
 | `F5` | Toggle webcam capture |
@@ -166,6 +171,7 @@ Options:
 | `Ctrl+C` | Exit |
 | `Esc` | Exit (if input empty) / Clear input (if typing) |
 | `PgUp/PgDn` | Scroll transcript |
+| `Number + Enter` | Choose an Ollama model while the picker is open |
 
 ### Tiling (Hyprland-style)
 
@@ -195,6 +201,7 @@ The focused tile is highlighted with a double border.
 | `/curl <args>` | Shortcut for curl |
 | `/brew <args>` | Shortcut for brew |
 | `/provider <name>` | Switch AI provider |
+| `/ollama` | Switch to Ollama and open the local model picker |
 | `/video` | Toggle video panel |
 | `/youtube <url>` | Resolve and stream a YouTube video into the video panel using `yt-dlp` |
 | `/webcam` | Toggle webcam |
@@ -215,8 +222,9 @@ The focused tile is highlighted with a double border.
 | `/theme reset` | Restore default color palette |
 | `/help` | Toggle help overlay |
 
-`./install.sh` installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) for you. If you do a manual setup, make sure `yt-dlp` is installed and available on your `PATH` before using `/youtube`.
+`./install.sh` installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and Ollama for you. If you do a manual setup, make sure both are installed and available before using `/youtube` or the Ollama provider.
 `/youtube` now streams directly into the video bus by resolving a playable media URL first, so it no longer has to cache the full video before playback starts.
+Ollama model selection is populated from the local machine at runtime. ASCIIVision does not assume any default model names; it lists whatever Ollama reports as installed on that system.
 
 ---
 
@@ -318,7 +326,7 @@ asciivision/
 ├── .env.example         # API key template (copy to .env)
 ├── src/
 │   ├── main.rs          # App shell: modes, rendering, input dispatch, tiling integration
-│   ├── ai.rs            # Multi-provider AI client with streaming (Claude, Grok, GPT-5, Gemini)
+│   ├── ai.rs            # Multi-provider AI client with streaming (Claude, Grok, GPT-5, Gemini, Ollama)
 │   ├── tools.rs         # Agentic tool definitions and execution (shell, files, search, HTTP, sysinfo)
 │   ├── memory.rs        # Persistent agent memory (SQLite-backed key-value store)
 │   ├── video.rs         # FFmpeg-based MP4 to ASCII art decoder
@@ -360,4 +368,4 @@ asciivision/
 - A webcam (optional, for webcam/video chat features)
 - Only one app can use the webcam at a time on macOS -- close OBS/Zoom/FaceTime before enabling webcam capture
 
-All build dependencies and video extras (Rust, FFmpeg, LLVM, `yt-dlp`) are installed automatically by `./install.sh`.
+All build dependencies and local-media extras (Rust, FFmpeg, LLVM, `yt-dlp`, Ollama) are installed automatically by `./install.sh`.

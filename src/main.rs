@@ -35,7 +35,10 @@ mod tools;
 mod video;
 mod webcam;
 
-use ai::{AIClient, AIProvider, AIResponse, Message as ApiMessage, StreamChunk};
+use ai::{
+    list_ollama_models, ollama_install_hint, AIClient, AIProvider, AIResponse,
+    Message as ApiMessage, OllamaModelInfo, StreamChunk,
+};
 use analytics::AnalyticsPanel;
 use client::VideoChatClient;
 use db::Database;
@@ -187,6 +190,12 @@ enum AppEvent {
     YoutubeFailed {
         error: String,
     },
+    OllamaModelsReady {
+        models: Vec<OllamaModelInfo>,
+    },
+    OllamaModelsFailed {
+        error: String,
+    },
     PendingApproval {
         session_id: u64,
         tool_calls: Vec<ToolCall>,
@@ -202,6 +211,13 @@ struct App {
     video_enabled: bool,
     video_source_label: String,
     pending_video_load: bool,
+    ollama_models: Vec<OllamaModelInfo>,
+    ollama_selected_model: Option<String>,
+    show_ollama_picker: bool,
+    ollama_picker_loading: bool,
+    ollama_picker_error: Option<String>,
+    ollama_selection_input: String,
+    ollama_picker_scroll: usize,
     input: String,
     messages: Vec<ChatMessage>,
     reveal_queue: VecDeque<RevealJob>,
@@ -359,11 +375,18 @@ impl App {
                 AppMode::Intro
             },
             provider: provider.clone(),
-            ai_client: AIClient::new(provider),
+            ai_client: AIClient::new(provider.clone(), None),
             video_enabled: true,
             video,
             video_source_label,
             pending_video_load: false,
+            ollama_models: Vec::new(),
+            ollama_selected_model: None,
+            show_ollama_picker: false,
+            ollama_picker_loading: false,
+            ollama_picker_error: None,
+            ollama_selection_input: String::new(),
+            ollama_picker_scroll: 0,
             input: String::new(),
             messages: Vec::new(),
             reveal_queue: VecDeque::new(),
@@ -415,7 +438,7 @@ impl App {
         );
         app.add_system_message(format!(
             "provider uplink live: {} // F2 rotate // F4 3D fx // F5 webcam // F7 cycle fx",
-            app.provider.name()
+            app.provider_display_name()
         ));
         app.add_system_message(format!(
             "agentic mode online: tool-use loop active // trust level: {} // /trust to cycle",
@@ -444,11 +467,219 @@ impl App {
             );
         }
 
+        if app.provider == AIProvider::Ollama {
+            app.prepare_ollama_provider("startup route");
+        }
+
         if app.webcam.is_some() {
             app.add_system_message("webcam capture online: live ascii feed active");
         }
 
         Ok(app)
+    }
+
+    fn rebuild_ai_client(&mut self) {
+        let model = if self.provider == AIProvider::Ollama {
+            self.ollama_selected_model.clone()
+        } else {
+            None
+        };
+        self.ai_client = AIClient::new(self.provider.clone(), model);
+    }
+
+    fn provider_display_name(&self) -> String {
+        if self.provider == AIProvider::Ollama {
+            if let Some(model) = &self.ollama_selected_model {
+                format!("{} ({})", self.provider.name(), model)
+            } else {
+                format!("{} (select model)", self.provider.name())
+            }
+        } else {
+            self.provider.name().to_string()
+        }
+    }
+
+    fn provider_status_badge(&self) -> String {
+        if self.provider == AIProvider::Ollama {
+            if let Some(model) = &self.ollama_selected_model {
+                format!("{} // {}", self.provider.badge(), truncate(model, 24))
+            } else {
+                format!("{} // select model", self.provider.badge())
+            }
+        } else {
+            self.provider.badge().to_string()
+        }
+    }
+
+    fn request_ollama_models(&mut self) {
+        self.ollama_picker_loading = true;
+        self.ollama_picker_error = None;
+        let tx = self.events_tx.clone();
+        tokio::spawn(async move {
+            let event = match list_ollama_models().await {
+                Ok(models) => AppEvent::OllamaModelsReady { models },
+                Err(error) => AppEvent::OllamaModelsFailed {
+                    error: error.to_string(),
+                },
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    fn prepare_ollama_provider(&mut self, route: &str) {
+        self.show_ollama_picker = true;
+        self.ollama_selection_input.clear();
+        self.ollama_picker_scroll = 0;
+        self.request_ollama_models();
+        self.rebuild_ai_client();
+        if let Some(model) = self.ollama_selected_model.clone() {
+            self.add_system_message(format!(
+                "{} -> {} // current model: {} // type a number to switch",
+                route,
+                self.provider.name(),
+                model
+            ));
+            self.status_note = format!("ollama ready: {}", truncate(&model, 28));
+        } else {
+            self.add_system_message(format!(
+                "{} -> {} // type a model number and press Enter",
+                route,
+                self.provider.name()
+            ));
+            self.status_note = "ollama: select model".to_string();
+        }
+    }
+
+    fn set_provider(&mut self, provider: AIProvider, route: &str) {
+        self.session_id = self.session_id.wrapping_add(1);
+        self.pending_ai = false;
+        self.provider = provider;
+        if self.provider == AIProvider::Ollama {
+            self.prepare_ollama_provider(route);
+        } else {
+            self.show_ollama_picker = false;
+            self.ollama_selection_input.clear();
+            self.ollama_picker_error = None;
+            self.rebuild_ai_client();
+            self.add_system_message(format!("{} -> {}", route, self.provider.name()));
+            self.status_note = format!("active provider: {}", self.provider_status_badge());
+        }
+    }
+
+    fn select_ollama_model_by_number(&mut self, selection: usize) {
+        if selection == 0 || selection > self.ollama_models.len() {
+            self.status_note = format!("ollama model {} is out of range", selection);
+            self.add_system_message(format!(
+                "ollama model {} is out of range. choose 1-{}.",
+                selection,
+                self.ollama_models.len()
+            ));
+            return;
+        }
+
+        let model = self.ollama_models[selection - 1].name.clone();
+        self.ollama_selected_model = Some(model.clone());
+        self.show_ollama_picker = false;
+        self.ollama_selection_input.clear();
+        self.rebuild_ai_client();
+        self.add_system_message(format!("ollama model selected -> {}", model));
+        self.status_note = format!("ollama model: {}", truncate(&model, 28));
+    }
+
+    fn confirm_ollama_selection(&mut self) {
+        if self.ollama_picker_loading {
+            self.status_note = "ollama models are still loading".to_string();
+            return;
+        }
+
+        if self.ollama_models.is_empty() {
+            let error = self
+                .ollama_picker_error
+                .clone()
+                .unwrap_or_else(|| "no ollama models available".to_string());
+            self.add_system_message(format!("ollama unavailable: {}", error));
+            self.status_note = "ollama unavailable".to_string();
+            return;
+        }
+
+        if self.ollama_selection_input.is_empty() {
+            if let Some(model) = &self.ollama_selected_model {
+                self.show_ollama_picker = false;
+                self.status_note = format!("ollama model: {}", truncate(model, 28));
+            } else {
+                self.status_note = "type an ollama model number first".to_string();
+            }
+            return;
+        }
+
+        match self.ollama_selection_input.parse::<usize>() {
+            Ok(selection) => self.select_ollama_model_by_number(selection),
+            Err(_) => {
+                self.add_system_message("ollama selection must be a number");
+                self.status_note = "invalid ollama model number".to_string();
+            }
+        }
+    }
+
+    fn handle_ollama_picker_key(&mut self, key: KeyEvent) -> bool {
+        if !self.show_ollama_picker {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.show_ollama_picker = false;
+                self.ollama_selection_input.clear();
+                self.status_note = if let Some(model) = &self.ollama_selected_model {
+                    format!("ollama model: {}", truncate(model, 28))
+                } else {
+                    "ollama picker closed".to_string()
+                };
+            }
+            KeyCode::Enter => self.confirm_ollama_selection(),
+            KeyCode::Backspace => {
+                self.ollama_selection_input.pop();
+            }
+            KeyCode::Up => {
+                self.ollama_picker_scroll = self.ollama_picker_scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.ollama_picker_scroll = self
+                    .ollama_picker_scroll
+                    .saturating_add(1)
+                    .min(self.ollama_models.len().saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                self.ollama_picker_scroll = self.ollama_picker_scroll.saturating_sub(8);
+            }
+            KeyCode::PageDown => {
+                self.ollama_picker_scroll = self
+                    .ollama_picker_scroll
+                    .saturating_add(8)
+                    .min(self.ollama_models.len().saturating_sub(1));
+            }
+            KeyCode::Char('j') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.ollama_picker_scroll = self
+                    .ollama_picker_scroll
+                    .saturating_add(1)
+                    .min(self.ollama_models.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.ollama_picker_scroll = self.ollama_picker_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.request_ollama_models();
+                self.status_note = "refreshing ollama models".to_string();
+            }
+            KeyCode::Char(c)
+                if c.is_ascii_digit() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.ollama_selection_input.push(c);
+            }
+            _ => {}
+        }
+
+        true
     }
 
     fn tick(&mut self) {
@@ -498,7 +729,7 @@ impl App {
                             self.reveal_queue.push_back(RevealJob::new(index, text, 9));
                             self.follow_tail = true;
                             self.status_note =
-                                format!("{} response injected", self.provider.badge());
+                                format!("{} response injected", self.provider_status_badge());
                         }
                         Err(error) => {
                             self.add_system_message(format!("provider fault: {}", error));
@@ -690,7 +921,8 @@ impl App {
                             }
                             self.stream_buffer.clear();
                             self.stream_message_index = None;
-                            self.status_note = format!("{} stream complete", self.provider.badge());
+                            self.status_note =
+                                format!("{} stream complete", self.provider_status_badge());
                         }
                     }
                 }
@@ -775,6 +1007,34 @@ impl App {
                     self.add_system_message(format!("youtube error: {}", error));
                     self.status_note = "youtube load failed".to_string();
                 }
+                AppEvent::OllamaModelsReady { models } => {
+                    self.ollama_picker_loading = false;
+                    self.ollama_picker_error = None;
+                    self.ollama_models = models;
+                    if let Some(selected) = &self.ollama_selected_model {
+                        if !self.ollama_models.iter().any(|model| &model.name == selected) {
+                            self.ollama_selected_model = None;
+                            self.rebuild_ai_client();
+                        }
+                    }
+                    if self.provider == AIProvider::Ollama {
+                        self.add_system_message(format!(
+                            "ollama models ready: {} detected on this machine. type a number and press Enter.",
+                            self.ollama_models.len()
+                        ));
+                        self.status_note =
+                            format!("ollama models ready: {}", self.ollama_models.len());
+                    }
+                }
+                AppEvent::OllamaModelsFailed { error } => {
+                    self.ollama_picker_loading = false;
+                    self.ollama_models.clear();
+                    self.ollama_picker_error = Some(error.clone());
+                    if self.provider == AIProvider::Ollama {
+                        self.add_system_message(format!("ollama error: {}", error));
+                        self.status_note = "ollama unavailable".to_string();
+                    }
+                }
             }
         }
 
@@ -846,6 +1106,14 @@ impl App {
             return Ok(false);
         }
 
+        if !matches!(key.code, KeyCode::F(_))
+            && !(key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('l') | KeyCode::Char('c')))
+            && self.handle_ollama_picker_key(key)
+        {
+            return Ok(false);
+        }
+
         if self.pending_approval.is_none()
             && self.input.is_empty()
             && self.tiling.focused_panel() == Some(PanelKind::Games)
@@ -885,12 +1153,7 @@ impl App {
                 self.status_note = "theme restored to default".to_string();
             }
             KeyCode::F(2) => {
-                self.session_id = self.session_id.wrapping_add(1);
-                self.pending_ai = false;
-                self.provider = self.provider.cycle();
-                self.ai_client = AIClient::new(self.provider.clone());
-                self.add_system_message(format!("uplink rerouted -> {}", self.provider.name()));
-                self.status_note = format!("active provider: {}", self.provider.badge());
+                self.set_provider(self.provider.cycle(), "uplink rerouted");
             }
             KeyCode::F(3) => {
                 self.video_enabled = !self.video_enabled;
@@ -1250,12 +1513,12 @@ impl App {
         }
 
         if let Some(provider_name) = input.strip_prefix("/provider ") {
-            self.provider = AIProvider::from_input(provider_name);
-            self.ai_client = AIClient::new(self.provider.clone());
-            self.session_id = self.session_id.wrapping_add(1);
-            self.pending_ai = false;
-            self.add_system_message(format!("manual route -> {}", self.provider.name()));
-            self.status_note = format!("active provider: {}", self.provider.badge());
+            self.set_provider(AIProvider::from_input(provider_name), "manual route");
+            return;
+        }
+
+        if input == "/ollama" {
+            self.set_provider(AIProvider::Ollama, "manual route");
             return;
         }
 
@@ -1370,6 +1633,15 @@ impl App {
             return;
         }
 
+        if self.provider == AIProvider::Ollama && self.ollama_selected_model.is_none() {
+            self.show_ollama_picker = true;
+            self.status_note = "select an ollama model first".to_string();
+            self.add_system_message(
+                "Ollama is active, but no model is selected yet. Type a model number in the picker and press Enter.",
+            );
+            return;
+        }
+
         let enriched_input = self.inject_file_references(&input);
 
         let message = ChatMessage::user(enriched_input.clone());
@@ -1378,7 +1650,7 @@ impl App {
         self.pending_ai = true;
         self.streaming_active = true;
         self.tool_loop_depth = 0;
-        self.status_note = format!("streaming -> {}", self.provider.badge());
+        self.status_note = format!("streaming -> {}", self.provider_status_badge());
 
         // Create the assistant message shell for streaming into
         let assistant_msg = ChatMessage::assistant(&self.provider);
@@ -1833,6 +2105,10 @@ impl App {
         if self.show_help {
             self.render_help_overlay(frame, area);
         }
+
+        if self.show_ollama_picker {
+            self.render_ollama_overlay(frame, area);
+        }
     }
 
     fn render_tile_panel(
@@ -1963,7 +2239,7 @@ impl App {
 
         let meta = format!(
             "{} // {} {} {} {} // layout:{} focus:{} // ai:{} shell:{}",
-            self.provider.badge(),
+            self.provider_status_badge(),
             if self.video_enabled { "vid:on" } else { "vid:off" },
             cam_tag,
             fx_tag,
@@ -2170,7 +2446,7 @@ impl App {
             Line::from(vec![
                 Span::styled("provider: ", Style::default().fg(t().accent2).bold()),
                 Span::styled(
-                    self.provider.name(),
+                    self.provider_display_name(),
                     Style::default().fg(self.provider.color()),
                 ),
             ]),
@@ -2254,6 +2530,10 @@ impl App {
             )),
             Line::from(Span::styled(
                 "/webcam /3d /fx /analytics /games",
+                Style::default().fg(t().text),
+            )),
+            Line::from(Span::styled(
+                "/provider <name> /ollama switch ai route or local model picker",
                 Style::default().fg(t().text),
             )),
             Line::from(Span::styled(
@@ -2551,7 +2831,7 @@ impl App {
                 Span::styled("> ", Style::default().fg(t().accent4).bold()),
                 Span::styled(
                     if self.input.is_empty() {
-                        "prompt, !bash, @file, /games, /trust, /remember, /pin, /webcam ..."
+                        "prompt, !bash, @file, /ollama, /games, /trust, /remember ..."
                     } else {
                         self.input.as_str()
                     },
@@ -2577,6 +2857,116 @@ impl App {
         );
     }
 
+    fn render_ollama_overlay(&self, frame: &mut Frame, area: Rect) {
+        let popup = centered_area(area, 74, 72);
+        frame.render_widget(Clear, popup);
+        let title = if self.ollama_picker_loading {
+            " OLLAMA // DISCOVERING LOCAL MODELS "
+        } else {
+            " OLLAMA // MODEL PICKER "
+        };
+        let block = Block::default()
+            .title(title)
+            .title_style(Style::default().fg(self.provider.color()).bold())
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(t().accent1));
+        frame.render_widget(block, popup);
+
+        let inner = popup.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+
+        let current_model = self
+            .ollama_selected_model
+            .clone()
+            .unwrap_or_else(|| "none selected".to_string());
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("MODEL SELECT ", Style::default().fg(t().accent2).bold()),
+                Span::styled(
+                    "Type a number and press Enter. Esc closes. R refreshes. J/K or arrows scroll.",
+                    Style::default().fg(t().text),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("current: ", Style::default().fg(t().accent2).bold()),
+                Span::styled(current_model, Style::default().fg(self.provider.color())),
+            ]),
+            Line::from(""),
+        ];
+
+        if self.ollama_picker_loading {
+            lines.push(Line::from(Span::styled(
+                "Scanning the local Ollama API for installed models...",
+                Style::default().fg(t().accent4),
+            )));
+        } else if let Some(error) = &self.ollama_picker_error {
+            lines.push(Line::from(Span::styled(
+                "Ollama is not ready on this machine:",
+                Style::default().fg(t().danger).bold(),
+            )));
+            lines.push(Line::from(Span::styled(
+                error,
+                Style::default().fg(t().text),
+            )));
+            if error.contains("not installed") {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    ollama_install_hint(),
+                    Style::default().fg(t().accent4),
+                )));
+            }
+        } else {
+            for (idx, model) in self.ollama_models.iter().enumerate() {
+                let marker = if self
+                    .ollama_selected_model
+                    .as_ref()
+                    .map(|selected| selected == &model.name)
+                    .unwrap_or(false)
+                {
+                    ">"
+                } else {
+                    " "
+                };
+                let meta = format_ollama_model_meta(model);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} {:>2}. ", marker, idx + 1),
+                        Style::default().fg(t().accent2).bold(),
+                    ),
+                    Span::styled(model.name.clone(), Style::default().fg(t().text)),
+                    Span::styled(
+                        format!("  [{}]", meta),
+                        Style::default().fg(t().muted),
+                    ),
+                ]));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("selection: ", Style::default().fg(t().accent2).bold()),
+            Span::styled(
+                if self.ollama_selection_input.is_empty() {
+                    "_".to_string()
+                } else {
+                    self.ollama_selection_input.clone()
+                },
+                Style::default().fg(self.provider.color()),
+            ),
+        ]));
+
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .wrap(Wrap { trim: false })
+                .scroll((self.ollama_picker_scroll as u16, 0))
+                .style(Style::default().bg(t().panel_bg)),
+            inner,
+        );
+    }
+
     fn render_help_overlay(&self, frame: &mut Frame, area: Rect) {
         let popup = centered_area(area, 78, 75);
         frame.render_widget(Clear, popup);
@@ -2591,7 +2981,7 @@ impl App {
         let text = Text::from(vec![
             Line::from(vec![
                 Span::styled("PROMPTS    ", Style::default().fg(t().accent2).bold()),
-                Span::styled("plain text goes to the active AI provider", Style::default().fg(t().text)),
+                Span::styled("plain text goes to the active AI provider; Ollama opens a local model picker", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
                 Span::styled("SHELL      ", Style::default().fg(t().accent2).bold()),
@@ -2623,12 +3013,12 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("SHORTCUTS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/curl, /brew, /provider, /video, /youtube, /clear, /help, /username, /games", Style::default().fg(t().text)),
+                Span::styled("/curl, /brew, /provider, /ollama, /video, /youtube, /clear, /help, /username, /games", Style::default().fg(t().text)),
             ]),
             Line::from(""),
             Line::from(Span::styled("Keyboard", Style::default().fg(t().accent4).bold())),
             Line::from("  F1       toggle this overlay"),
-            Line::from("  F2       cycle AI provider (Claude, Grok, GPT-5, Gemini)"),
+            Line::from("  F2       cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama)"),
             Line::from("  F3       toggle live video panel"),
             Line::from("  F4       toggle 3D effects overlay"),
             Line::from("  F5       toggle webcam capture"),
@@ -2652,7 +3042,7 @@ impl App {
             Line::from("  Games     focus arcade tile and use 1-3 / WASD / Esc / R"),
             Line::from(""),
             Line::from(Span::styled("Modules", Style::default().fg(t().accent4).bold())),
-            Line::from("  AI Chat: Claude 4.5, Grok 4, GPT-5, Gemini 2.5 Pro"),
+            Line::from("  AI Chat: Claude 4.5, Grok 4, GPT-5, Gemini 3 Flash, local Ollama models"),
             Line::from("  Video: MP4 ASCII playback | Webcam: Live camera ASCII feed"),
             Line::from("  Video Chat: WebSocket multi-user streaming"),
             Line::from("  3D FX: matrix, plasma, starfield, wireframe, fire, particles"),
@@ -3138,6 +3528,45 @@ fn scale_rgb(r: u8, g: u8, b: u8, factor: f32) -> Color {
         (g as f32 * factor).clamp(0.0, 255.0) as u8,
         (b as f32 * factor).clamp(0.0, 255.0) as u8,
     )
+}
+
+fn format_ollama_model_meta(model: &OllamaModelInfo) -> String {
+    let mut parts = Vec::new();
+    if model.is_cloud {
+        parts.push("cloud".to_string());
+    } else if model.size_bytes > 0 {
+        parts.push(human_bytes(model.size_bytes));
+    }
+    if let Some(parameter_size) = &model.parameter_size {
+        if !parameter_size.is_empty() {
+            parts.push(parameter_size.clone());
+        }
+    }
+    if let Some(family) = &model.family {
+        if !family.is_empty() {
+            parts.push(family.clone());
+        }
+    }
+    if parts.is_empty() {
+        "model".to_string()
+    } else {
+        parts.join(" | ")
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

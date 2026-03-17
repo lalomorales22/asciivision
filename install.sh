@@ -134,6 +134,12 @@ install_deps_macos() {
         success "yt-dlp found"
     fi
 
+    if ! has_cmd ollama; then
+        packages+=(ollama)
+    else
+        success "Ollama found"
+    fi
+
     # Check for llvm/libclang
     local has_libclang=false
     local search_dirs=(
@@ -171,6 +177,17 @@ install_deps_macos() {
         brew install "${packages[@]}"
         success "macOS dependencies installed"
     fi
+}
+
+install_ollama_linux() {
+    if has_cmd ollama; then
+        success "Ollama found"
+        return
+    fi
+
+    info "Installing Ollama via the official install script..."
+    curl -fsSL https://ollama.com/install.sh | sh
+    success "Ollama installed"
 }
 
 # ---------------------------------------------------------------------------
@@ -223,7 +240,7 @@ install_deps_linux() {
             ;;
         *)
             err "Could not detect your Linux distribution."
-            err "Please manually install: FFmpeg dev libs, libclang, pkg-config, yt-dlp, and a C compiler."
+            err "Please manually install: FFmpeg dev libs, libclang, pkg-config, yt-dlp, Ollama, and a C compiler."
             err "Then re-run this script."
             exit 1
             ;;
@@ -360,7 +377,10 @@ main() {
     # 2. System dependencies
     case "${OS}" in
         macos) install_deps_macos ;;
-        linux) install_deps_linux ;;
+        linux)
+            install_deps_linux
+            install_ollama_linux
+            ;;
     esac
 
     # 3. Build
@@ -382,6 +402,7 @@ main() {
     echo ""
     info "Optional: edit .env to add AI API keys (not required for video/effects/sysmon)"
     info "YouTube video loading is available via /youtube now that yt-dlp is installed"
+    info "Ollama local-model routing is available via F2 or /ollama once your models are pulled"
     echo ""
 
     if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then

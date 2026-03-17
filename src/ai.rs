@@ -14,6 +14,7 @@ pub enum AIProvider {
     Grok,
     OpenAI,
     Gemini,
+    Ollama,
 }
 
 impl AIProvider {
@@ -23,6 +24,7 @@ impl AIProvider {
             "grok" | "xai" => Self::Grok,
             "gpt" | "openai" | "gpt5" | "gpt-5" => Self::OpenAI,
             "gemini" | "google" => Self::Gemini,
+            "ollama" | "local" => Self::Ollama,
             _ => Self::Claude,
         }
     }
@@ -32,7 +34,8 @@ impl AIProvider {
             Self::Claude => Self::Grok,
             Self::Grok => Self::OpenAI,
             Self::OpenAI => Self::Gemini,
-            Self::Gemini => Self::Claude,
+            Self::Gemini => Self::Ollama,
+            Self::Ollama => Self::Claude,
         }
     }
 
@@ -42,6 +45,7 @@ impl AIProvider {
             Self::Grok => "Grok 4 Fast",
             Self::OpenAI => "GPT-5 Nano",
             Self::Gemini => "Gemini 3 Flash",
+            Self::Ollama => "Ollama Local",
         }
     }
 
@@ -51,6 +55,7 @@ impl AIProvider {
             Self::Grok => "X.AI",
             Self::OpenAI => "OPENAI",
             Self::Gemini => "GOOGLE",
+            Self::Ollama => "OLLAMA",
         }
     }
 
@@ -60,6 +65,7 @@ impl AIProvider {
             Self::Grok => "grok",
             Self::OpenAI => "gpt",
             Self::Gemini => "gemini",
+            Self::Ollama => "ollama",
         }
     }
 
@@ -69,6 +75,7 @@ impl AIProvider {
             Self::Grok => Color::Rgb(104, 206, 232),
             Self::OpenAI => Color::Rgb(108, 197, 181),
             Self::Gemini => Color::Rgb(119, 153, 234),
+            Self::Ollama => Color::Rgb(144, 214, 121),
         }
     }
 
@@ -80,6 +87,7 @@ impl AIProvider {
             Self::Gemini => {
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent"
             }
+            Self::Ollama => "http://127.0.0.1:11434/v1/chat/completions",
         }
     }
 
@@ -94,6 +102,7 @@ impl AIProvider {
             Self::Grok => "grok-4-fast-non-reasoning",
             Self::OpenAI => "gpt-5-nano",
             Self::Gemini => "gemini-3-flash-preview",
+            Self::Ollama => "",
         }
     }
 
@@ -103,12 +112,24 @@ impl AIProvider {
             Self::Grok => "GROK_API_KEY",
             Self::OpenAI => "OPENAI_API_KEY",
             Self::Gemini => "GEMINI_API_KEY",
+            Self::Ollama => "",
         }
     }
 
     fn api_key(&self) -> Result<String> {
-        env::var(self.api_key_env())
-            .with_context(|| format!("{} not set in environment", self.api_key_env()))
+        match self {
+            Self::Ollama => Ok("ollama".to_string()),
+            _ => env::var(self.api_key_env())
+                .with_context(|| format!("{} not set in environment", self.api_key_env())),
+        }
+    }
+
+    fn openai_bearer_token(&self) -> Result<Option<String>> {
+        match self {
+            Self::OpenAI | Self::Grok => Ok(Some(self.api_key()?)),
+            Self::Ollama => Ok(None),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -129,6 +150,102 @@ pub enum StreamChunk {
     Delta(String),
     ToolCallsReceived(Vec<ToolCall>, String),
     Done,
+}
+
+#[derive(Debug, Clone)]
+pub struct OllamaModelInfo {
+    pub name: String,
+    pub size_bytes: u64,
+    pub parameter_size: Option<String>,
+    pub family: Option<String>,
+    pub is_cloud: bool,
+}
+
+pub fn ollama_install_hint() -> &'static str {
+    "Ollama is not installed. To install it, run `curl -fsSL https://ollama.com/install.sh | sh`."
+}
+
+pub async fn list_ollama_models() -> Result<Vec<OllamaModelInfo>> {
+    let cli_probe = tokio::process::Command::new("ollama")
+        .arg("--version")
+        .output()
+        .await;
+    if let Err(error) = cli_probe {
+        return if error.kind() == std::io::ErrorKind::NotFound {
+            Err(anyhow!(ollama_install_hint()))
+        } else {
+            Err(anyhow!(error).context("failed to check ollama installation"))
+        };
+    }
+
+    let client = Client::new();
+    let response = client
+        .get("http://127.0.0.1:11434/api/tags")
+        .send()
+        .await
+        .map_err(|error| {
+            anyhow!(error).context(
+                "Ollama is installed, but its local API is not responding on http://127.0.0.1:11434. Start it with `ollama serve` and try again.",
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "Ollama model lookup failed with {}: {}",
+            status,
+            body
+        ));
+    }
+
+    let payload: OllamaTagsResponse = response
+        .json()
+        .await
+        .context("failed to parse Ollama model list")?;
+
+    if payload.models.is_empty() {
+        return Err(anyhow!(
+            "Ollama is installed, but no models were found. Pull one with `ollama pull <model>` first."
+        ));
+    }
+
+    Ok(payload
+        .models
+        .into_iter()
+        .map(|model| OllamaModelInfo {
+            name: model.name,
+            size_bytes: model.size,
+            parameter_size: model.details.parameter_size,
+            family: model.details.family,
+            is_cloud: model.remote_host.is_some(),
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTagsResponse {
+    #[serde(default)]
+    models: Vec<OllamaModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaModelEntry {
+    name: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    remote_host: Option<String>,
+    #[serde(default)]
+    details: OllamaModelDetails,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OllamaModelDetails {
+    #[serde(default)]
+    parameter_size: Option<String>,
+    #[serde(default)]
+    family: Option<String>,
 }
 
 // Claude types
@@ -393,13 +510,15 @@ struct OpenAIStreamFunction {
 pub struct AIClient {
     provider: AIProvider,
     client: Client,
+    model_override: Option<String>,
 }
 
 impl AIClient {
-    pub fn new(provider: AIProvider) -> Self {
+    pub fn new(provider: AIProvider, model_override: Option<String>) -> Self {
         Self {
             provider,
             client: Client::new(),
+            model_override,
         }
     }
 
@@ -423,7 +542,7 @@ impl AIClient {
     ) -> Result<AIResponse> {
         match self.provider {
             AIProvider::Claude => self.send_claude_with_tools(messages, tools).await,
-            AIProvider::Grok | AIProvider::OpenAI => {
+            AIProvider::Grok | AIProvider::OpenAI | AIProvider::Ollama => {
                 self.send_openai_with_tools(messages, tools).await
             }
             AIProvider::Gemini => self.send_gemini_with_tools(messages, tools).await,
@@ -438,7 +557,7 @@ impl AIClient {
     ) -> Result<()> {
         match self.provider {
             AIProvider::Claude => self.stream_claude(messages, chunk_tx).await,
-            AIProvider::Grok | AIProvider::OpenAI => {
+            AIProvider::Grok | AIProvider::OpenAI | AIProvider::Ollama => {
                 self.stream_openai(messages, chunk_tx).await
             }
             AIProvider::Gemini => {
@@ -463,7 +582,7 @@ impl AIClient {
                 self.send_claude_tool_results(messages, tool_calls, tool_results, tools)
                     .await
             }
-            AIProvider::Grok | AIProvider::OpenAI => {
+            AIProvider::Grok | AIProvider::OpenAI | AIProvider::Ollama => {
                 self.send_openai_tool_results(messages, tool_calls, tool_results, tools)
                     .await
             }
@@ -484,7 +603,7 @@ impl AIClient {
             AIProvider::Claude => {
                 self.stream_claude_with_tools(messages, tools, chunk_tx).await
             }
-            AIProvider::Grok | AIProvider::OpenAI => {
+            AIProvider::Grok | AIProvider::OpenAI | AIProvider::Ollama => {
                 self.stream_openai_with_tools(messages, tools, chunk_tx).await
             }
             AIProvider::Gemini => {
@@ -503,6 +622,16 @@ impl AIClient {
                 }
                 Ok(())
             }
+        }
+    }
+
+    fn model_name(&self) -> Result<&str> {
+        match self.provider {
+            AIProvider::Ollama => self
+                .model_override
+                .as_deref()
+                .context("Ollama is active but no model is selected"),
+            _ => Ok(self.provider.model()),
         }
     }
 
@@ -894,7 +1023,7 @@ impl AIClient {
         });
 
         let request = OpenAIRequest {
-            model: self.provider.model().to_string(),
+            model: self.model_name()?.to_string(),
             messages: messages
                 .iter()
                 .map(|m| OpenAIMessage {
@@ -908,14 +1037,14 @@ impl AIClient {
             stream: false,
         };
 
-        let response = self
+        let mut request_builder = self
             .client
             .post(self.provider.api_url())
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.provider.api_key()?),
-            )
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if let Some(token) = self.provider.openai_bearer_token()? {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+        }
+        let response = request_builder
             .json(&request)
             .send()
             .await
@@ -1001,23 +1130,20 @@ impl AIClient {
         }
 
         let request = OpenAIRequest {
-            model: self.provider.model().to_string(),
+            model: self.model_name()?.to_string(),
             messages: msgs,
             tools: openai_tools,
             stream: false,
         };
 
-        let response = self
+        let mut request_builder = self
             .client
             .post(self.provider.api_url())
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.provider.api_key()?),
-            )
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+        if let Some(token) = self.provider.openai_bearer_token()? {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+        }
+        let response = request_builder.json(&request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1035,7 +1161,7 @@ impl AIClient {
         chunk_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<()> {
         let request = OpenAIRequest {
-            model: self.provider.model().to_string(),
+            model: self.model_name()?.to_string(),
             messages: messages
                 .iter()
                 .map(|m| OpenAIMessage {
@@ -1049,17 +1175,14 @@ impl AIClient {
             stream: true,
         };
 
-        let response = self
+        let mut request_builder = self
             .client
             .post(self.provider.stream_url())
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.provider.api_key()?),
-            )
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+        if let Some(token) = self.provider.openai_bearer_token()? {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+        }
+        let response = request_builder.json(&request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1119,7 +1242,7 @@ impl AIClient {
         });
 
         let request = OpenAIRequest {
-            model: self.provider.model().to_string(),
+            model: self.model_name()?.to_string(),
             messages: messages
                 .iter()
                 .map(|m| OpenAIMessage {
@@ -1133,17 +1256,14 @@ impl AIClient {
             stream: true,
         };
 
-        let response = self
+        let mut request_builder = self
             .client
             .post(self.provider.api_url())
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.provider.api_key()?),
-            )
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+        if let Some(token) = self.provider.openai_bearer_token()? {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+        }
+        let response = request_builder.json(&request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
