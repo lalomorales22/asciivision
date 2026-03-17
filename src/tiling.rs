@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PanelKind {
     Transcript,
+    Games,
     Video,
     Webcam,
     Telemetry,
@@ -19,6 +20,7 @@ impl PanelKind {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Transcript => "TRANSCRIPT",
+            Self::Games => "GAMES",
             Self::Video => "VIDEO BUS",
             Self::Webcam => "WEBCAM",
             Self::Telemetry => "TELEMETRY",
@@ -34,7 +36,8 @@ impl PanelKind {
 
     pub fn cycle_next(self) -> Self {
         match self {
-            Self::Transcript => Self::Video,
+            Self::Transcript => Self::Games,
+            Self::Games => Self::Video,
             Self::Video => Self::Webcam,
             Self::Webcam => Self::Telemetry,
             Self::Telemetry => Self::OpsDeck,

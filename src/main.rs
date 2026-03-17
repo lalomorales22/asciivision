@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -9,6 +9,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
+use serde::Deserialize;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -22,6 +23,7 @@ mod analytics;
 mod client;
 mod db;
 mod effects;
+mod games;
 mod memory;
 mod message;
 mod server;
@@ -38,6 +40,7 @@ use analytics::AnalyticsPanel;
 use client::VideoChatClient;
 use db::Database;
 use effects::EffectsEngine;
+use games::{GameKind, GamesPanel};
 use memory::AgentMemory;
 use server::VideoChatServer;
 use shell::{format_outcome, run as run_shell, ShellOutcome};
@@ -177,6 +180,13 @@ enum AppEvent {
     ShellFinished {
         outcome: ShellOutcome,
     },
+    YoutubeReady {
+        title: String,
+        source: String,
+    },
+    YoutubeFailed {
+        error: String,
+    },
     PendingApproval {
         session_id: u64,
         tool_calls: Vec<ToolCall>,
@@ -190,6 +200,8 @@ struct App {
     ai_client: AIClient,
     video: Option<VideoPlayer>,
     video_enabled: bool,
+    video_source_label: String,
+    pending_video_load: bool,
     input: String,
     messages: Vec<ChatMessage>,
     reveal_queue: VecDeque<RevealJob>,
@@ -210,6 +222,7 @@ struct App {
 
     // new modules
     effects: EffectsEngine,
+    games: GamesPanel,
     analytics: AnalyticsPanel,
     tiling: TilingManager,
     sysmon: SystemMonitor,
@@ -300,6 +313,12 @@ impl App {
         } else {
             resolve_video_path(args.background_video, args.intro_video)
         };
+        let video_source_label = video_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("synthetic raster")
+            .to_string();
         let video = match video_path {
             Some(path) => Some(VideoPlayer::new(path, (132, 46), true)?),
             None => None,
@@ -343,6 +362,8 @@ impl App {
             ai_client: AIClient::new(provider),
             video_enabled: true,
             video,
+            video_source_label,
+            pending_video_load: false,
             input: String::new(),
             messages: Vec::new(),
             reveal_queue: VecDeque::new(),
@@ -362,6 +383,7 @@ impl App {
             status_note: "cold boot // intro online".to_string(),
 
             effects,
+            games: GamesPanel::new(),
             analytics: AnalyticsPanel::new(),
             tiling: TilingManager::new(),
             sysmon: SystemMonitor::new(),
@@ -404,6 +426,9 @@ impl App {
         );
         app.add_system_message(
             "video chat: /server <port> to host, /connect ws://<addr> to join, /chat <msg> to send"
+        );
+        app.add_system_message(
+            "games bay online: /games to load the arcade panel, 1-3 to launch, WASD to play when that tile is focused"
         );
         app.add_system_message(
             "tiling: Ctrl+hjkl focus, Ctrl+Shift+hjkl swap, Ctrl+[/] resize, Ctrl+n cycle panel, /layout cycle preset"
@@ -727,12 +752,36 @@ impl App {
                     );
                     self.follow_tail = true;
                 }
+                AppEvent::YoutubeReady { title, source } => {
+                    self.pending_video_load = false;
+                    match VideoPlayer::new(source, (132, 46), false) {
+                        Ok(player) => {
+                            self.video = Some(player);
+                            self.video_enabled = true;
+                            self.video_source_label = title.clone();
+                            self.tiling.set_focused_panel(PanelKind::Video);
+                            self.add_system_message(format!("youtube stream locked: {}", title));
+                            self.status_note =
+                                format!("youtube streaming: {}", truncate(&title, 30));
+                        }
+                        Err(error) => {
+                            self.add_system_message(format!("youtube video error: {}", error));
+                            self.status_note = "youtube video failed to open".to_string();
+                        }
+                    }
+                }
+                AppEvent::YoutubeFailed { error } => {
+                    self.pending_video_load = false;
+                    self.add_system_message(format!("youtube error: {}", error));
+                    self.status_note = "youtube load failed".to_string();
+                }
             }
         }
 
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last_tick);
         self.last_tick = now;
+        self.games.tick(elapsed.as_secs_f32());
         let tick_factor = ((elapsed.as_secs_f32() / 0.016).ceil() as usize).max(1);
 
         if let Some(job) = self.reveal_queue.front_mut() {
@@ -794,6 +843,15 @@ impl App {
             self.messages.clear();
             self.reveal_queue.clear();
             self.status_note = "transcript purged".to_string();
+            return Ok(false);
+        }
+
+        if self.pending_approval.is_none()
+            && self.input.is_empty()
+            && self.tiling.focused_panel() == Some(PanelKind::Games)
+            && self.games.handle_key(key)
+        {
+            self.status_note = self.games.status_note().to_string();
             return Ok(false);
         }
 
@@ -982,6 +1040,31 @@ impl App {
             return;
         }
 
+        if let Some(url) = input.strip_prefix("/youtube ") {
+            let url = url.trim().to_string();
+            if url.is_empty() {
+                self.add_system_message("usage: /youtube https://youtube.com/watch?v=...");
+                return;
+            }
+            self.pending_video_load = true;
+            self.status_note = "youtube stream resolving".to_string();
+            self.add_system_message(format!("youtube stream requested: {}", truncate(&url, 72)));
+            let tx = self.events_tx.clone();
+            tokio::spawn(async move {
+                let event = match resolve_youtube_stream(url).await {
+                    Ok(video) => AppEvent::YoutubeReady {
+                        title: video.title,
+                        source: video.source,
+                    },
+                    Err(error) => AppEvent::YoutubeFailed {
+                        error: error.to_string(),
+                    },
+                };
+                let _ = tx.send(event);
+            });
+            return;
+        }
+
         if input == "/webcam" {
             if self.webcam.is_some() {
                 self.webcam = None;
@@ -1067,6 +1150,50 @@ impl App {
 
         if input == "/sysmon" {
             self.tiling.set_focused_panel(PanelKind::SystemMonitor);
+            return;
+        }
+
+        if input == "/games" {
+            self.tiling.set_focused_panel(PanelKind::Games);
+            self.status_note = self.games.status_note().to_string();
+            return;
+        }
+
+        if let Some(rest) = input.strip_prefix("/games ") {
+            let rest = rest.trim();
+            match rest.to_lowercase().as_str() {
+                "menu" | "select" | "stop" => {
+                    self.games.stop();
+                    self.tiling.set_focused_panel(PanelKind::Games);
+                    self.status_note = self.games.status_note().to_string();
+                }
+                "play" | "start" => {
+                    self.games.activate_selected();
+                    self.tiling.set_focused_panel(PanelKind::Games);
+                    self.status_note = self.games.status_note().to_string();
+                }
+                "next" => {
+                    self.games.next_game();
+                    self.tiling.set_focused_panel(PanelKind::Games);
+                    self.status_note = self.games.status_note().to_string();
+                }
+                "prev" | "previous" => {
+                    self.games.previous_game();
+                    self.tiling.set_focused_panel(PanelKind::Games);
+                    self.status_note = self.games.status_note().to_string();
+                }
+                _ => {
+                    if let Some(game) = GameKind::from_input(rest) {
+                        self.games.launch(game);
+                        self.tiling.set_focused_panel(PanelKind::Games);
+                        self.status_note = self.games.status_note().to_string();
+                    } else {
+                        self.add_system_message(
+                            "games: /games, /games play, /games menu, /games next, /games pacman|space|penguin",
+                        );
+                    }
+                }
+            }
             return;
         }
 
@@ -1726,6 +1853,7 @@ impl App {
         );
         match panel {
             PanelKind::Transcript => self.render_messages_tile(frame, area, is_focused),
+            PanelKind::Games => self.games.render(frame, area, phase, is_focused),
             PanelKind::Video => self.render_video_panel(frame, area, phase),
             PanelKind::Webcam => self.render_webcam_panel(frame, area, phase),
             PanelKind::Telemetry => self.render_telemetry(frame, area, phase),
@@ -1934,7 +2062,11 @@ impl App {
 
     fn render_video_panel(&self, frame: &mut Frame, area: Rect, phase: f32) {
         let title = if self.video_enabled {
-            " LIVE VIDEO BUS "
+            if self.pending_video_load {
+                " LIVE VIDEO BUS // YOUTUBE LOADING "
+            } else {
+                " LIVE VIDEO BUS "
+            }
         } else {
             " SYNTHETIC FIELD "
         };
@@ -1954,13 +2086,24 @@ impl App {
             if let Some(video) = &self.video {
                 video.render(frame, inner, 0.92);
                 let meta = format!(
-                    "sig:{}  provider:{}",
+                    "sig:{}  source:{}",
                     if video.has_signal() { "lock" } else { "seek" },
-                    self.provider.badge()
+                    truncate(&self.video_source_label, 22)
                 );
                 render_gradient_text(frame.buffer_mut(), inner.x + 1, inner.y, &meta, t().accent4, t().text);
                 return;
             }
+        }
+
+        if self.pending_video_load {
+            frame.render_widget(
+                Paragraph::new("yt-dlp is resolving a playable YouTube stream...\n\nWhen the stream handshake completes, this panel will switch over automatically.")
+                    .style(Style::default().fg(t().accent4).bg(t().panel_bg))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: false }),
+                inner,
+            );
+            return;
         }
 
         render_synthetic_scope(frame.buffer_mut(), inner, phase);
@@ -2110,7 +2253,11 @@ impl App {
                 Style::default().fg(t().text),
             )),
             Line::from(Span::styled(
-                "/webcam /3d /fx /analytics",
+                "/webcam /3d /fx /analytics /games",
+                Style::default().fg(t().text),
+            )),
+            Line::from(Span::styled(
+                "/youtube <url> stream YouTube into video bus",
                 Style::default().fg(t().text),
             )),
             Line::from(""),
@@ -2404,7 +2551,7 @@ impl App {
                 Span::styled("> ", Style::default().fg(t().accent4).bold()),
                 Span::styled(
                     if self.input.is_empty() {
-                        "prompt, !bash, @file, /trust, /remember, /pin, /webcam, /3d ..."
+                        "prompt, !bash, @file, /games, /trust, /remember, /pin, /webcam ..."
                     } else {
                         self.input.as_str()
                     },
@@ -2416,7 +2563,7 @@ impl App {
                 Span::styled("mode: ", Style::default().fg(t().accent2).bold()),
                 Span::styled(status, Style::default().fg(status_color)),
                 Span::styled(
-                    format!("  |  {}  |  F1 help  F2 ai  F4 3D  F5 cam  F6 layout  F9 theme  Ctrl+hjkl tile", trust_tag),
+                    format!("  |  {}  |  F1 help  F2 ai  F4 3D  F5 cam  F6 layout  F8 panel  /games arcade", trust_tag),
                     Style::default().fg(t().muted),
                 ),
             ]),
@@ -2455,6 +2602,10 @@ impl App {
                 Span::styled("/server <port>, /connect ws://<addr>, /chat <msg>", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
+                Span::styled("VIDEO BUS  ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/video toggles the panel, /youtube <url> streams YouTube into it", Style::default().fg(t().text)),
+            ]),
+            Line::from(vec![
                 Span::styled("WEBCAM     ", Style::default().fg(t().accent2).bold()),
                 Span::styled("/webcam or F5 to toggle live ASCII webcam feed", Style::default().fg(t().text)),
             ]),
@@ -2467,8 +2618,12 @@ impl App {
                 Span::styled("/analytics or F6 for live conversation stats dashboard", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
+                Span::styled("GAMES      ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/games loads the arcade panel; 1-3 launches Pac-Man, Space Invaders, or 3D Penguin", Style::default().fg(t().text)),
+            ]),
+            Line::from(vec![
                 Span::styled("SHORTCUTS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/curl, /brew, /provider, /video, /clear, /help, /username", Style::default().fg(t().text)),
+                Span::styled("/curl, /brew, /provider, /video, /youtube, /clear, /help, /username, /games", Style::default().fg(t().text)),
             ]),
             Line::from(""),
             Line::from(Span::styled("Keyboard", Style::default().fg(t().accent4).bold())),
@@ -2494,12 +2649,14 @@ impl App {
             Line::from("  Ctrl+[/]  resize focused split narrower/wider"),
             Line::from("  Ctrl+n    cycle focused tile to next panel type"),
             Line::from("  /layout  cycle layout (default, dual, triple, quad, webcam, focus)"),
+            Line::from("  Games     focus arcade tile and use 1-3 / WASD / Esc / R"),
             Line::from(""),
             Line::from(Span::styled("Modules", Style::default().fg(t().accent4).bold())),
             Line::from("  AI Chat: Claude 4.5, Grok 4, GPT-5, Gemini 2.5 Pro"),
             Line::from("  Video: MP4 ASCII playback | Webcam: Live camera ASCII feed"),
             Line::from("  Video Chat: WebSocket multi-user streaming"),
             Line::from("  3D FX: matrix, plasma, starfield, wireframe, fire, particles"),
+            Line::from("  Games: Pac-Man, Space Invaders, 3D Penguin"),
             Line::from("  Sys Monitor: CPU, memory, swap, network, load average"),
             Line::from("  Analytics: Real-time conversation statistics"),
             Line::from("  Shell: Full bash, curl, brew integration"),
@@ -2549,6 +2706,96 @@ fn resolve_video_path(background: Option<String>, intro: Option<String>) -> Opti
     candidates.push(PathBuf::from("demo-videos/demo.mp4"));
 
     candidates.into_iter().find(|path| Path::new(path).exists())
+}
+
+#[derive(Deserialize)]
+struct YoutubeInfo {
+    title: Option<String>,
+}
+
+struct YoutubeStream {
+    title: String,
+    source: String,
+}
+
+async fn resolve_youtube_stream(url: String) -> Result<YoutubeStream> {
+    let info_output = tokio::process::Command::new("yt-dlp")
+        .arg("--dump-single-json")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg(&url)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(ytdlp_spawn_error)?;
+
+    if !info_output.status.success() {
+        anyhow::bail!(command_error_message("yt-dlp metadata lookup", &info_output));
+    }
+
+    let info: YoutubeInfo = serde_json::from_slice(&info_output.stdout)
+        .context("parse yt-dlp metadata json")?;
+    let title = info
+        .title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "youtube video".to_string());
+    let stream_output = tokio::process::Command::new("yt-dlp")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg("--get-url")
+        .arg("--format")
+        .arg("bestvideo[height<=720]/best[height<=720]/bestvideo/best")
+        .arg(&url)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(ytdlp_spawn_error)?;
+
+    if !stream_output.status.success() {
+        anyhow::bail!(command_error_message("yt-dlp stream lookup", &stream_output));
+    }
+
+    let source = parse_stream_url(&stream_output.stdout)
+        .context("yt-dlp did not report a playable stream url")?;
+
+    Ok(YoutubeStream { title, source })
+}
+
+fn parse_stream_url(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("http://") || line.starts_with("https://"))
+        .map(str::to_string)
+}
+
+fn command_error_message(context: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    if detail.is_empty() {
+        format!(
+            "{} failed with status {}",
+            context,
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        )
+    } else {
+        format!("{} failed: {}", context, detail)
+    }
+}
+
+fn ytdlp_spawn_error(error: std::io::Error) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!("yt-dlp is not installed. install it first, then retry /youtube")
+    } else {
+        anyhow::Error::new(error).context("spawn yt-dlp")
+    }
 }
 
 fn render_ascii_frame(buffer: &mut Buffer, area: Rect, ascii: &video::AsciiFrame, intensity: f32) {

@@ -14,11 +14,12 @@ ASCIIVision is a single Rust binary that packs an absurd amount of functionality
 - **Streaming Responses** -- AI responses appear character-by-character in real-time via SSE streaming (Claude, OpenAI, Grok), with seamless tool-use handoff mid-stream
 - **Agentic Tool Use** -- AI can autonomously execute shell commands, read/write files, search codebases, make HTTP requests, and query system info with configurable approval gates
 - **Shell Execution** -- run any bash command inline with `!<cmd>`, plus `/curl` and `/brew` shortcuts
-- **ASCII Video Playback** -- MP4 files decoded to real-time colored ASCII art via FFmpeg
+- **ASCII Video Playback** -- MP4 files and streamed YouTube sources decoded to real-time colored ASCII art via FFmpeg
 - **Live Webcam** -- your camera feed converted to ASCII art in real-time, with error reporting when the device is busy
 - **WebSocket Video Chat** -- host or join multi-user live ASCII video chat rooms
 - **3D Terminal Effects** -- rainbow matrix rain, plasma fields, 3D starfield, wireframe rotating cube, fire simulation, particle storms
 - **Hyprland-Style Tiling** -- move, swap, resize, and reassign panels with Ctrl+hjkl keybindings and 6 layout presets
+- **Games Window** -- playable Pac-Man, Space Invaders, and 3D Penguin inside a focused tile with selector + WASD controls
 - **System Monitor** -- live CPU, memory, swap, network I/O, load average, per-core sparklines
 - **Conversation Analytics** -- real-time stats dashboard with message counts, provider breakdown, bar charts
 - **Context Management** -- automatic summarization of older messages when the context window fills up, @-file injection, pinnable messages, persistent agent memory across sessions
@@ -34,7 +35,7 @@ Legacy companion apps (mega-cli, mega-analytics) are preserved in the `archive/`
 
 ### One-Line Install (Recommended)
 
-The install script handles everything -- Rust, FFmpeg, LLVM, building, and adding `asciivision` to your PATH:
+The install script handles everything -- Rust, FFmpeg, LLVM, `yt-dlp`, building, and adding `asciivision` to your PATH:
 
 ```bash
 git clone https://github.com/lalomorales22/asciivision.git
@@ -47,6 +48,8 @@ After installation, run from anywhere:
 ```bash
 asciivision
 ```
+
+The repo includes `demo-videos/demo.mp4` as the bundled intro/video sample, so the video bus works out of the box.
 
 **Supported platforms:** macOS (Homebrew), Ubuntu/Debian, Fedora/RHEL, Arch Linux, openSUSE.
 **Windows users:** Install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) first (`wsl --install` in PowerShell), then run the commands above inside your WSL terminal.
@@ -61,19 +64,20 @@ If you prefer to install dependencies yourself:
 - **FFmpeg** dev libraries
 - **LLVM/libclang** (needed to compile ffmpeg-sys-next)
 - **pkg-config**
+- **yt-dlp** (for `/youtube`)
 
 ```bash
 # macOS
-brew install ffmpeg llvm pkg-config
+brew install ffmpeg llvm pkg-config yt-dlp
 
 # Ubuntu/Debian
-sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libavdevice-dev pkg-config libclang-dev build-essential
+sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libavdevice-dev pkg-config libclang-dev build-essential yt-dlp
 
 # Fedora (enable RPM Fusion first)
-sudo dnf install ffmpeg-devel clang-devel pkg-config gcc
+sudo dnf install ffmpeg-devel clang-devel pkg-config gcc yt-dlp
 
 # Arch
-sudo pacman -S ffmpeg clang pkg-config base-devel
+sudo pacman -S ffmpeg clang pkg-config base-devel yt-dlp
 ```
 
 #### Build & Run
@@ -192,10 +196,13 @@ The focused tile is highlighted with a double border.
 | `/brew <args>` | Shortcut for brew |
 | `/provider <name>` | Switch AI provider |
 | `/video` | Toggle video panel |
+| `/youtube <url>` | Resolve and stream a YouTube video into the video panel using `yt-dlp` |
 | `/webcam` | Toggle webcam |
 | `/3d` or `/effects` | Toggle 3D effects |
 | `/fx` | Cycle to next 3D effect |
 | `/analytics` | Show analytics in focused tile |
+| `/games` | Show the games panel in the focused tile |
+| `/games <pacman|space|penguin>` | Launch a specific game in the games panel |
 | `/sysmon` | Show system monitor in focused tile |
 | `/layout` | Cycle layout preset |
 | `/layout <name>` | Set layout: default, dual, triple, quad, webcam, focus |
@@ -207,6 +214,9 @@ The focused tile is highlighted with a double border.
 | `/randomize` | Randomize all UI colors |
 | `/theme reset` | Restore default color palette |
 | `/help` | Toggle help overlay |
+
+`./install.sh` installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) for you. If you do a manual setup, make sure `yt-dlp` is installed and available on your `PATH` before using `/youtube`.
+`/youtube` now streams directly into the video bus by resolving a playable media URL first, so it no longer has to cache the full video before playback starts.
 
 ---
 
@@ -221,7 +231,18 @@ The focused tile is highlighted with a double border.
 | **Webcam Focus** | Webcam top-right, 3D Effects below it, transcript+sysmon left |
 | **Full Focus** | Single full-screen transcript |
 
-Every tile can be reassigned to any of 11 panel types: Transcript, Video, Webcam, Telemetry, Ops Deck, 3D Effects, Analytics, Video Chat Feeds, Video Chat Messages, Video Chat Users, or System Monitor.
+Every tile can be reassigned to any of 12 panel types: Transcript, Games, Video, Webcam, Telemetry, Ops Deck, 3D Effects, Analytics, Video Chat Feeds, Video Chat Messages, Video Chat Users, or System Monitor.
+
+---
+
+## Games Window
+
+Focus a tile and press `F8` or `Ctrl+n` until it becomes `GAMES`, or run `/games`.
+
+- **Selection** -- `1`, `2`, `3`, arrow keys, or `WASD` choose between Pac-Man, Space Invaders, and 3D Penguin
+- **Launch** -- `Enter` or `Space`
+- **Play** -- `WASD` control the active game while the Games tile is focused and the input prompt is empty
+- **Reset / Exit** -- `R` restarts the current game, `Esc` returns to the games selector
 
 ---
 
@@ -315,7 +336,7 @@ asciivision/
 ├── archive/
 │   ├── mega-cli/        # Legacy standalone multi-AI chat app
 │   └── mega-analytics/  # Legacy standalone analytics dashboard
-└── demo-videos/         # Sample MP4 files
+└── demo-videos/         # Bundled sample video (`demo.mp4`) for intro/video playback
 ```
 
 ---
@@ -339,4 +360,4 @@ asciivision/
 - A webcam (optional, for webcam/video chat features)
 - Only one app can use the webcam at a time on macOS -- close OBS/Zoom/FaceTime before enabling webcam capture
 
-All build dependencies (Rust, FFmpeg, LLVM) are installed automatically by `./install.sh`.
+All build dependencies and video extras (Rust, FFmpeg, LLVM, `yt-dlp`) are installed automatically by `./install.sh`.

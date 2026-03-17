@@ -29,7 +29,7 @@ breathe.mp4
 kiro-build.mp4
 anniversary.mp4
 mega-cli/all-llms.txt
-demo-videos/lalo.mp4
-demo-videos/demo3.mp4
-demo-videos/demo33.mp4
+demo-videos/*.mp4
+!demo-videos/demo.mp4
 archive/mega-analytics/loading.mp4
+/games/

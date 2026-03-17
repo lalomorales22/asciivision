@@ -128,6 +128,12 @@ install_deps_macos() {
         success "pkg-config found"
     fi
 
+    if ! has_cmd yt-dlp; then
+        packages+=(yt-dlp)
+    else
+        success "yt-dlp found"
+    fi
+
     # Check for llvm/libclang
     local has_libclang=false
     local search_dirs=(
@@ -178,7 +184,7 @@ install_deps_linux() {
             info "Detected Debian/Ubuntu-based system"
             local pkgs=(
                 libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libavdevice-dev
-                pkg-config libclang-dev build-essential
+                pkg-config libclang-dev build-essential yt-dlp
             )
             info "Installing: ${pkgs[*]}"
             sudo apt-get update -qq
@@ -195,7 +201,7 @@ install_deps_linux() {
                     2>/dev/null || true
             fi
             local pkgs=(
-                ffmpeg-devel clang-devel pkg-config gcc
+                ffmpeg-devel clang-devel pkg-config gcc yt-dlp
             )
             info "Installing: ${pkgs[*]}"
             sudo dnf install -y "${pkgs[@]}"
@@ -203,21 +209,21 @@ install_deps_linux() {
             ;;
         arch)
             info "Detected Arch-based system"
-            local pkgs=(ffmpeg clang pkg-config base-devel)
+            local pkgs=(ffmpeg clang pkg-config base-devel yt-dlp)
             info "Installing: ${pkgs[*]}"
             sudo pacman -Syu --noconfirm --needed "${pkgs[@]}"
             success "Dependencies installed via pacman"
             ;;
         suse)
             info "Detected openSUSE-based system"
-            local pkgs=(ffmpeg-devel libclang-devel pkg-config gcc)
+            local pkgs=(ffmpeg-devel libclang-devel pkg-config gcc yt-dlp)
             info "Installing: ${pkgs[*]}"
             sudo zypper install -y "${pkgs[@]}"
             success "Dependencies installed via zypper"
             ;;
         *)
             err "Could not detect your Linux distribution."
-            err "Please manually install: FFmpeg dev libs, libclang, pkg-config, and a C compiler."
+            err "Please manually install: FFmpeg dev libs, libclang, pkg-config, yt-dlp, and a C compiler."
             err "Then re-run this script."
             exit 1
             ;;
@@ -375,6 +381,7 @@ main() {
     info "Or from repo: ./asciivision"
     echo ""
     info "Optional: edit .env to add AI API keys (not required for video/effects/sysmon)"
+    info "YouTube video loading is available via /youtube now that yt-dlp is installed"
     echo ""
 
     if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
