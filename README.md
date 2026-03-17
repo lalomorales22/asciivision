@@ -209,7 +209,7 @@ The focused tile is highlighted with a double border.
 | `/fx` | Cycle to next 3D effect |
 | `/analytics` | Show analytics in focused tile |
 | `/games` | Show the games panel in the focused tile |
-| `/games <pacman|space|penguin>` | Launch a specific game in the games panel |
+| `/games` <pacman|space|penguin> | Launch a specific game in the games panel |
 | `/sysmon` | Show system monitor in focused tile |
 | `/layout` | Cycle layout preset |
 | `/layout <name>` | Set layout: default, dual, triple, quad, webcam, focus |
