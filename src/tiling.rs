@@ -240,18 +240,26 @@ pub enum LayoutPreset {
     Quad,
     WebcamFocus,
     FullFocus,
+    VideoChat,
+    Arcade,
 }
 
 impl LayoutPreset {
+    /// Every preset in cycle order (palette entries, F6 cycling).
+    pub const ALL: [Self; 8] = [
+        Self::Default,
+        Self::DualPane,
+        Self::TripleColumn,
+        Self::Quad,
+        Self::WebcamFocus,
+        Self::FullFocus,
+        Self::VideoChat,
+        Self::Arcade,
+    ];
+
     pub fn cycle(self) -> Self {
-        match self {
-            Self::Default => Self::DualPane,
-            Self::DualPane => Self::TripleColumn,
-            Self::TripleColumn => Self::Quad,
-            Self::Quad => Self::WebcamFocus,
-            Self::WebcamFocus => Self::FullFocus,
-            Self::FullFocus => Self::Default,
-        }
+        let idx = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 
     pub fn name(&self) -> &'static str {
@@ -262,6 +270,8 @@ impl LayoutPreset {
             Self::Quad => "QUAD",
             Self::WebcamFocus => "WEBCAM FOCUS",
             Self::FullFocus => "FULL FOCUS",
+            Self::VideoChat => "VIDEO CHAT",
+            Self::Arcade => "ARCADE",
         }
     }
 }
@@ -390,6 +400,29 @@ impl TilingManager {
                 ),
             ),
             LayoutPreset::FullFocus => self.make_leaf(PanelKind::Transcript),
+            // Video chat room view: big feeds pane with the transcript kept
+            // visible bottom-left (chat-input feedback), messages + roster
+            // stacked in the right column.
+            LayoutPreset::VideoChat => TileNode::hsplit(
+                0.60,
+                TileNode::vsplit(
+                    0.62,
+                    self.make_leaf(PanelKind::VideoChatFeeds),
+                    self.make_leaf(PanelKind::Transcript),
+                ),
+                TileNode::vsplit(
+                    0.55,
+                    self.make_leaf(PanelKind::VideoChatMessages),
+                    self.make_leaf(PanelKind::VideoChatUsers),
+                ),
+            ),
+            // Arcade: the games panel gets the floor, transcript stays as a
+            // side column for command feedback and multiplayer chatter.
+            LayoutPreset::Arcade => TileNode::hsplit(
+                0.70,
+                self.make_leaf(PanelKind::Games),
+                self.make_leaf(PanelKind::Transcript),
+            ),
         };
         self.focused = 0;
     }

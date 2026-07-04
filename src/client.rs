@@ -21,9 +21,8 @@ const GAME_INBOX_CAP: usize = 512;
 
 /// A game-scoped message received from another participant
 /// (identity fields are server-authoritative -- they cannot be spoofed).
-/// Consumed by the stage-2 games glue (App::tick -> games.handle_net).
+/// Consumed by the games glue in App::tick -> games.handle_net.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GameNetMsg {
     pub from_id: String,
     pub from_name: String,
@@ -43,8 +42,6 @@ pub enum NetEvent {
 
 enum Outgoing {
     Chat(String),
-    // constructed by send_game, which the stage-2 games glue calls
-    #[allow(dead_code)]
     Game(String, Value),
     Frame(AsciiFrame),
 }
@@ -132,8 +129,6 @@ impl VideoChatClient {
     }
 
     /// Queue a game payload for relay to all other participants.
-    /// (stage-2 games glue entry point)
-    #[allow(dead_code)]
     pub fn send_game(&self, game: &str, payload: Value) {
         let _ = self.out_tx.send(Outgoing::Game(game.to_string(), payload));
     }
@@ -145,9 +140,7 @@ impl VideoChatClient {
         let _ = self.out_tx.send(Outgoing::Frame(frame));
     }
 
-    /// Drain all pending inbound game messages (called from App::tick once
-    /// the stage-2 games glue lands).
-    #[allow(dead_code)]
+    /// Drain all pending inbound game messages (called from App::tick).
     pub fn drain_game_inbox(&self) -> Vec<GameNetMsg> {
         self.game_inbox.lock().drain(..).collect()
     }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -22,11 +22,13 @@ use tokio::sync::mpsc;
 mod ai;
 mod analytics;
 mod client;
+mod commands;
 mod db;
 mod effects;
 mod games;
 mod memory;
 mod message;
+mod palette;
 mod roomcode;
 mod server;
 mod shader;
@@ -45,10 +47,12 @@ use ai::{
 };
 use analytics::AnalyticsPanel;
 use client::{NetEvent, VideoChatClient};
+use commands::CommandId;
 use db::Database;
 use effects::EffectsEngine;
 use games::{GameKind, GamesPanel};
 use memory::AgentMemory;
+use palette::{EntryAction, Palette, PaletteAction, PaletteEntry};
 use server::VideoChatServer;
 use shell::{format_outcome, run as run_shell, ShellOutcome};
 use sysmon::SystemMonitor;
@@ -79,7 +83,7 @@ const SMALL_LOGO: &[&str] = &[
 ];
 
 const SCROLLER_TEXT: &str =
-    " ASCIIVISION v2.0 // AI DEMOZONE // LIVE VIDEO CHAT // WEBCAM ASCII // 3D EFFECTS ENGINE // TRUE PTY TILES // !bash !curl !brew // F2 MODEL // F3 VIDEO // F4 FX CYCLE // F5 WEBCAM // F6 LAYOUT // F7 TILES // CTRL+L PURGE // THIS TERMINAL HAS LEFT THE BUILDING ";
+    " ASCIIVISION v3.0 // CTRL+P COMMAND PALETTE // /HOST A ROOM AND FRIENDS /JOIN <CODE> // ONLINE PONG + TRON OVER THE WIRE // SNAKE + BREAKOUT // RAY-MARCHED FX: TORUS KNOT METABALLS TUNNEL SYNTHWAVE JULIA // TRUE PTY TILES // F1 MANUAL // F4 FX // F6 LAYOUT // THIS TERMINAL HAS LEFT THE BUILDING ";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -236,6 +240,8 @@ struct App {
     messages: Vec<ChatMessage>,
     reveal_queue: VecDeque<RevealJob>,
     show_help: bool,
+    help_scroll: usize,
+    palette: Palette,
     follow_tail: bool,
     scroll_lines: usize,
     pending_ai: bool,
@@ -263,6 +269,12 @@ struct App {
     /// hosted video chat server handle, if this instance is hosting
     chat_server: Option<Arc<VideoChatServer>>,
     chat_server_port: Option<u16>,
+    /// games<->network glue: outbound channel handed to GamesPanel while a
+    /// video chat connection is live (games push, tick() forwards to the wire)
+    game_net_tx: Option<mpsc::UnboundedSender<(String, serde_json::Value)>>,
+    game_net_rx: Option<mpsc::UnboundedReceiver<(String, serde_json::Value)>>,
+    /// last my_id passed to games.set_net (Welcome can arrive after connect)
+    game_net_my_id: Option<String>,
     username: String,
     /// cached body area for tiling direction calculations
     body_area: Rect,
@@ -409,6 +421,8 @@ impl App {
             messages: Vec::new(),
             reveal_queue: VecDeque::new(),
             show_help: false,
+            help_scroll: 0,
+            palette: Palette::new(),
             follow_tail: true,
             scroll_lines: 0,
             pending_ai: false,
@@ -434,6 +448,9 @@ impl App {
             video_chat: None,
             chat_server: None,
             chat_server_port: None,
+            game_net_tx: None,
+            game_net_rx: None,
+            game_net_my_id: None,
             username: args.username.clone(),
             body_area: Rect::default(),
 
@@ -455,31 +472,19 @@ impl App {
         };
 
         app.add_system_message(
-            "shell deck armed: use !<command> for bash, or /curl and /brew for shortcuts",
+            "ASCIIVISION v3 online — press Ctrl+P for the command palette: fuzzy-search every command, effect, game, and layout",
         );
         app.add_system_message(format!(
-            "provider uplink live: {} // F2 rotate // F4 fx cycle // F5 webcam // F7 tiles",
+            "provider uplink live: {} // F1 full manual // F2 rotate provider // shell via !<command>",
             app.provider_display_name()
         ));
+        app.add_system_message(
+            "multiplayer: /host opens a room and prints a code, a friend runs /join <code> — then Pong or Tron -> HOST/JOIN ONLINE",
+        );
         app.add_system_message(format!(
-            "agentic mode online: tool-use loop active // trust level: {} // /trust to cycle",
+            "agent tools active // trust: {} (/trust cycles) // @<file> injects, /remember <key>=<value> stores memory",
             app.trust_level.name()
         ));
-        app.add_system_message(
-            "context: @<filepath> to inject file // /pin to pin messages // /remember <key>=<value> to store memory"
-        );
-        app.add_system_message(
-            "video chat: /server <port> to host, /connect ws://<addr> to join, /chat <msg> to send"
-        );
-        app.add_system_message(
-            "games bay online: /games to load the arcade panel, 1-3 to launch, WASD to play when that tile is focused"
-        );
-        app.add_system_message(
-            "tiles online: /tiles or F7 boots live PTY terminals // /tiles 4 for a 2x2 shell grid"
-        );
-        app.add_system_message(
-            "tiling: Ctrl+hjkl focus, Ctrl+Shift+hjkl swap, Ctrl+[/] resize, Ctrl+n cycle panel, /layout cycle preset"
-        );
 
         if app.video.is_none() {
             app.add_system_message("video signal offline: no bundled mp4 found, falling back to synthetic raster field");
@@ -731,6 +736,8 @@ impl App {
                 }
             }
         }
+
+        self.sync_game_net();
 
         while let Ok(event) = self.events_rx.try_recv() {
             match event {
@@ -1095,6 +1102,13 @@ impl App {
         while event::poll(Duration::from_millis(10))? {
             match event::read()? {
                 Event::Key(key) => {
+                    // Accept Press + Repeat only. On Windows (and with the
+                    // kitty keyboard protocol) Release events are delivered
+                    // too and would double-fire every keystroke.
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
+
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && key.code == KeyCode::Char('c')
                     {
@@ -1150,6 +1164,76 @@ impl App {
             return Ok(false);
         }
 
+        // Command palette: modal interceptor (same bypass list as the Ollama
+        // picker: F-keys, Ctrl+L, Ctrl+C pass through). Esc is consumed here,
+        // so closing the palette can never trigger the double-Esc quit.
+        if self.palette.is_open()
+            && !matches!(key.code, KeyCode::F(_))
+            && !(key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('l') | KeyCode::Char('c')))
+        {
+            match self.palette.handle_key(key) {
+                PaletteAction::Close => {
+                    self.palette.close();
+                    self.status_note = "palette closed".to_string();
+                }
+                PaletteAction::Execute { action, title } => {
+                    self.palette.close();
+                    self.run_palette_action(action, &title);
+                }
+                PaletteAction::Consumed => {}
+            }
+            return Ok(false);
+        }
+
+        // Ctrl+P opens the palette — but never over a pending tool approval
+        // (those keys must keep meaning approve/reject).
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('p')
+            && self.pending_approval.is_none()
+        {
+            self.open_palette();
+            return Ok(false);
+        }
+
+        // Help overlay: scroll keys while open (picker-style). Other keys
+        // fall through so typing and F-keys keep working underneath.
+        if self.show_help {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Esc if self.pending_approval.is_none() => {
+                    self.show_help = false;
+                    self.status_note = "help closed".to_string();
+                    return Ok(false);
+                }
+                KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(8);
+                    return Ok(false);
+                }
+                KeyCode::PageDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(8);
+                    return Ok(false);
+                }
+                KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                    return Ok(false);
+                }
+                KeyCode::Down => {
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                    return Ok(false);
+                }
+                KeyCode::Char('j') if !ctrl && self.input.is_empty() => {
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                    return Ok(false);
+                }
+                KeyCode::Char('k') if !ctrl && self.input.is_empty() => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+
         if self.pending_approval.is_none()
             && self.input.is_empty()
             && self.tiling.focused_panel() == Some(PanelKind::Games)
@@ -1186,8 +1270,12 @@ impl App {
             }
             KeyCode::F(1) => {
                 self.show_help = !self.show_help;
-                theme::set_random_theme();
-                self.status_note = "theme randomized // F1 help".to_string();
+                if self.show_help {
+                    self.help_scroll = 0;
+                    self.status_note = "help open // PgUp/PgDn scroll // Esc closes".to_string();
+                } else {
+                    self.status_note = "help closed".to_string();
+                }
             }
             KeyCode::F(9) => {
                 theme::set_random_theme();
@@ -1341,7 +1429,8 @@ impl App {
             return true;
         }
 
-        // Block Ctrl+h/l (outer focus), Ctrl+Shift (swap), Ctrl+n, Ctrl+[/]
+        // Block Ctrl+h/l (outer focus), Ctrl+Shift (swap), Ctrl+n, Ctrl+[/],
+        // and Ctrl+p (command palette) from reaching the PTY.
         !matches!(
             key.code,
             KeyCode::Char('h')
@@ -1351,6 +1440,7 @@ impl App {
                 | KeyCode::Char('K')
                 | KeyCode::Char('L')
                 | KeyCode::Char('n')
+                | KeyCode::Char('p')
                 | KeyCode::Char('[')
                 | KeyCode::Char(']')
         )
@@ -1359,485 +1449,596 @@ impl App {
     fn dispatch_input(&mut self, input: String) {
         self.follow_tail = true;
 
-        if input == "/help" {
-            self.show_help = !self.show_help;
-            return;
-        }
-
-        if input == "/clear" {
-            self.messages.clear();
-            self.reveal_queue.clear();
-            self.status_note = "transcript purged".to_string();
-            return;
-        }
-
-        if input == "/video" {
-            self.video_enabled = !self.video_enabled;
-            self.status_note = if self.video_enabled {
-                "video bus online".to_string()
+        // !<command> raw shell escape hatch
+        if let Some(rest) = input.strip_prefix('!') {
+            let command = rest.trim();
+            if command.is_empty() {
+                self.add_system_message("usage: !<command>");
             } else {
-                "video bus muted".to_string()
+                self.start_shell(command.to_string());
+            }
+            return;
+        }
+
+        // Slash commands resolve through the registry. Unknown commands are
+        // guarded here: a typo never leaks to the AI as a chat prompt.
+        if input.starts_with('/') {
+            let (token, args) = match input.split_once(char::is_whitespace) {
+                Some((token, rest)) => (token, rest.trim()),
+                None => (input.as_str(), ""),
             };
-            return;
-        }
-
-        if let Some(url) = input.strip_prefix("/youtube ") {
-            let url = url.trim().to_string();
-            if url.is_empty() {
-                self.add_system_message("usage: /youtube https://youtube.com/watch?v=...");
-                return;
-            }
-            self.pending_video_load = true;
-            self.status_note = "youtube stream resolving".to_string();
-            self.add_system_message(format!("youtube stream requested: {}", truncate(&url, 72)));
-            let tx = self.events_tx.clone();
-            tokio::spawn(async move {
-                let event = match resolve_youtube_stream(url).await {
-                    Ok(video) => AppEvent::YoutubeReady {
-                        title: video.title,
-                        source: video.source,
-                    },
-                    Err(error) => AppEvent::YoutubeFailed {
-                        error: error.to_string(),
-                    },
-                };
-                let _ = tx.send(event);
-            });
-            return;
-        }
-
-        if input == "/webcam" {
-            if self.webcam.is_some() {
-                self.webcam = None;
-                self.webcam_frame = None;
-                self.add_system_message("webcam offline");
-            } else {
-                let config = self.webcam_config();
-                match WebcamCapture::start(config) {
-                    Ok(cam) => {
-                        self.webcam = Some(cam);
-                        self.add_system_message("webcam online: live ascii feed active");
-                    }
-                    Err(e) => self.add_system_message(format!("webcam error: {}", e)),
-                }
-            }
-            return;
-        }
-
-        if input == "/3d" || input == "/effects" {
-            self.effects.active = !self.effects.active;
-            self.status_note = if self.effects.active {
-                format!("3D fx: {}", self.effects.current_name())
-            } else {
-                "3D fx offline".to_string()
-            };
-            return;
-        }
-
-        if input == "/fx" || input.starts_with("/fx ") {
-            let arg = input.strip_prefix("/fx").map(str::trim).unwrap_or("");
-            if !arg.is_empty() {
-                if self.effects.set_by_name(arg) {
-                    self.add_system_message(format!("3D effect: {}", self.effects.current_name()));
-                    self.status_note = format!("3D fx: {}", self.effects.current_name());
-                } else {
-                    self.add_system_message(format!(
-                        "unknown effect '{}' -- available: {}",
-                        arg,
-                        self.effects.names().join(", ")
-                    ));
-                }
-                return;
-            }
-            self.effects.cycle_with_off();
-            if self.effects.active {
-                self.add_system_message(format!("3D effect: {}", self.effects.current_name()));
-            } else {
-                self.add_system_message("3D effects offline");
-            }
-            return;
-        }
-
-        if input == "/randomize" || input == "/theme random" {
-            theme::set_random_theme();
-            self.add_system_message("color palette randomized -- /theme reset to restore defaults");
-            self.status_note = "theme randomized".to_string();
-            return;
-        }
-
-        if input == "/theme reset" || input == "/theme default" {
-            theme::reset_theme();
-            self.add_system_message("theme restored to factory defaults");
-            self.status_note = "theme reset".to_string();
-            return;
-        }
-
-        if input == "/analytics" {
-            self.analytics.active = !self.analytics.active;
-            if self.analytics.active {
-                self.analytics.refresh(self.db.as_ref());
-                self.tiling.set_focused_panel(PanelKind::Analytics);
-            }
-            return;
-        }
-
-        if input == "/layout" {
-            let preset = self.tiling.preset.cycle();
-            self.tiling.apply_preset(preset);
-            self.add_system_message(format!("layout: {}", preset.name()));
-            return;
-        }
-
-        if let Some(name) = input.strip_prefix("/layout ") {
-            let preset = match name.trim().to_lowercase().as_str() {
-                "default" => LayoutPreset::Default,
-                "dual" => LayoutPreset::DualPane,
-                "triple" => LayoutPreset::TripleColumn,
-                "quad" => LayoutPreset::Quad,
-                "webcam" | "cam" => LayoutPreset::WebcamFocus,
-                "focus" | "full" => LayoutPreset::FullFocus,
-                _ => {
-                    self.add_system_message("layouts: default, dual, triple, quad, webcam, focus");
-                    return;
-                }
-            };
-            self.tiling.apply_preset(preset);
-            self.add_system_message(format!("layout: {}", preset.name()));
-            return;
-        }
-
-        if input == "/sysmon" {
-            self.tiling.set_focused_panel(PanelKind::SystemMonitor);
-            return;
-        }
-
-        if input == "/games" {
-            self.tiling.set_focused_panel(PanelKind::Games);
-            self.status_note = self.games.status_note().to_string();
-            return;
-        }
-
-        if input == "/tiles" {
-            match self.tiles.activate_count(2) {
-                Ok(()) => {
-                    self.tiling.set_focused_panel(PanelKind::Tiles);
-                    self.status_note = self.tiles.status_note().to_string();
-                }
-                Err(error) => {
-                    self.add_system_message(format!("tiles error: {}", error));
-                    self.status_note = "tiles failed to boot".to_string();
-                }
-            }
-            return;
-        }
-
-        if let Some(rest) = input.strip_prefix("/tiles ") {
-            let rest = rest.trim();
-            let count = match rest.parse::<usize>() {
-                Ok(count @ 1..=8) => count,
-                _ => {
-                    self.add_system_message("tiles: /tiles or /tiles <1-8>");
-                    return;
-                }
-            };
-
-            match self.tiles.activate_count(count) {
-                Ok(()) => {
-                    self.tiling.set_focused_panel(PanelKind::Tiles);
-                    self.status_note = self.tiles.status_note().to_string();
-                }
-                Err(error) => {
-                    self.add_system_message(format!("tiles error: {}", error));
-                    self.status_note = "tiles failed to boot".to_string();
-                }
-            }
-            return;
-        }
-
-        if let Some(rest) = input.strip_prefix("/games ") {
-            let rest = rest.trim();
-            match rest.to_lowercase().as_str() {
-                "menu" | "select" | "stop" => {
-                    self.games.stop();
-                    self.tiling.set_focused_panel(PanelKind::Games);
-                    self.status_note = self.games.status_note().to_string();
-                }
-                "play" | "start" => {
-                    self.games.activate_selected();
-                    self.tiling.set_focused_panel(PanelKind::Games);
-                    self.status_note = self.games.status_note().to_string();
-                }
-                "next" => {
-                    self.games.next_game();
-                    self.tiling.set_focused_panel(PanelKind::Games);
-                    self.status_note = self.games.status_note().to_string();
-                }
-                "prev" | "previous" => {
-                    self.games.previous_game();
-                    self.tiling.set_focused_panel(PanelKind::Games);
-                    self.status_note = self.games.status_note().to_string();
-                }
-                _ => {
-                    if let Some(game) = GameKind::from_input(rest) {
-                        self.games.launch(game);
-                        self.tiling.set_focused_panel(PanelKind::Games);
-                        self.status_note = self.games.status_note().to_string();
-                    } else {
-                        self.add_system_message(
-                            "games: /games, /games play, /games menu, /games next, /games pacman|space|penguin|pong|tron|snake|breakout",
-                        );
-                    }
-                }
-            }
-            return;
-        }
-
-        if let Some(port_str) = input.strip_prefix("/server ") {
-            if let Ok(port) = port_str.trim().parse::<u16>() {
-                if self.start_chat_server(port) {
-                    self.add_system_message(format!(
-                        "video chat server live on 0.0.0.0:{} -- /host does this plus auto-join",
-                        port
-                    ));
-                    self.status_note = format!("video chat server live on :{}", port);
-                }
-            } else {
-                self.add_system_message("usage: /server <port>");
-            }
-            return;
-        }
-
-        if input == "/host" || input.starts_with("/host ") {
-            let arg = input.strip_prefix("/host").unwrap_or("").trim();
-            let port = if arg.is_empty() {
-                Some(9999)
-            } else {
-                arg.parse::<u16>().ok()
-            };
-            let Some(port) = port else {
-                self.add_system_message("usage: /host [port]   (default 9999)");
-                return;
-            };
-            if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
-                self.add_system_message("already in a room -- /disconnect first");
-                return;
-            }
-            if self.start_chat_server(port) {
-                self.start_video_client(format!("ws://127.0.0.1:{}", port));
-                self.print_room_invite();
-                self.status_note = format!("hosting room on :{}", port);
-            }
-            return;
-        }
-
-        if input == "/join" || input.starts_with("/join ") {
-            let code = input.strip_prefix("/join").unwrap_or("").trim();
-            if code.is_empty() {
-                self.add_system_message("usage: /join <room-code>   (get one from a /host friend)");
-                return;
-            }
-            match roomcode::decode(code) {
-                Some(addr) => {
-                    if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
-                        self.add_system_message("already in a room -- /disconnect first");
-                        return;
-                    }
-                    self.add_system_message(format!(
-                        "joining room {} ({}) as {}",
-                        code.to_uppercase(),
-                        addr,
-                        self.username
-                    ));
-                    self.start_video_client(format!("ws://{}", addr));
+            match commands::find(token) {
+                Some(spec) => {
+                    let id = spec.id;
+                    self.run_command(id, args);
                 }
                 None => {
-                    self.add_system_message(
-                        "that room code didn't parse -- expected something like K7QM3-XZ2AB",
-                    );
-                }
-            }
-            return;
-        }
-
-        if input == "/invite" {
-            self.print_room_invite();
-            return;
-        }
-
-        if input == "/disconnect" {
-            if let Some(vc) = self.video_chat.take() {
-                vc.disconnect();
-                if let Some(port) = self.chat_server_port {
                     self.add_system_message(format!(
-                        "left the room (your server is still listening on :{})",
-                        port
+                        "unknown command {} — press Ctrl+P for the palette or F1 for the manual",
+                        token
                     ));
-                } else {
-                    self.add_system_message("left the room");
-                }
-                self.status_note = "video chat offline".to_string();
-            } else {
-                self.add_system_message("not connected to video chat");
-            }
-            return;
-        }
-
-        if let Some(url) = input.strip_prefix("/connect ") {
-            let url = url.trim().to_string();
-            let url = if url.contains("://") {
-                url
-            } else {
-                format!("ws://{}", url)
-            };
-            if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
-                self.add_system_message("already in a room -- /disconnect first");
-                return;
-            }
-            self.add_system_message(format!("connecting to {} as {}", url, self.username));
-            self.start_video_client(url);
-            return;
-        }
-
-        if let Some(msg) = input.strip_prefix("/chat ") {
-            match self.video_chat {
-                Some(ref vc) if vc.is_connected() => {
-                    vc.send_chat(msg.trim().to_string());
-                }
-                _ => {
-                    self.add_system_message(
-                        "not connected to video chat. use /host, /join <code>, or /connect ws://<addr>",
-                    );
+                    self.status_note =
+                        format!("unknown command {} — Ctrl+P or /help", truncate(token, 24));
                 }
             }
-            return;
-        }
-
-        if let Some(name) = input.strip_prefix("/username ") {
-            self.username = name.trim().to_string();
-            if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
-                self.add_system_message(format!(
-                    "username set to: {} (applies to your next connection)",
-                    self.username
-                ));
-            } else {
-                self.add_system_message(format!("username set to: {}", self.username));
-            }
-            return;
-        }
-
-        if let Some(provider_name) = input.strip_prefix("/provider ") {
-            self.set_provider(AIProvider::from_input(provider_name), "manual route");
-            return;
-        }
-
-        if input == "/ollama" {
-            self.set_provider(AIProvider::Ollama, "manual route");
-            return;
-        }
-
-        // Phase 1 commands
-        if input == "/trust" {
-            self.trust_level = self.trust_level.cycle();
-            self.add_system_message(format!("trust level: {}", self.trust_level.name()));
-            self.status_note = format!("trust: {}", self.trust_level.name());
-            return;
-        }
-
-        if let Some(rest) = input.strip_prefix("/remember ") {
-            if let Some((key, value)) = rest.split_once('=') {
-                let key = key.trim();
-                let value = value.trim();
-                if let Some(ref db) = self.db {
-                    match AgentMemory::remember(db, key, value, memory::MemoryKind::UserSet) {
-                        Ok(_) => {
-                            self.agent_memory.load(db);
-                            self.add_system_message(format!("remembered: {} = {}", key, value));
-                        }
-                        Err(e) => self.add_system_message(format!("memory error: {}", e)),
-                    }
-                } else {
-                    self.add_system_message("memory offline: database not available");
-                }
-            } else {
-                self.add_system_message("usage: /remember key = value");
-            }
-            return;
-        }
-
-        if let Some(key) = input.strip_prefix("/forget ") {
-            let key = key.trim();
-            if let Some(ref db) = self.db {
-                match AgentMemory::forget(db, key) {
-                    Ok(true) => {
-                        self.agent_memory.load(db);
-                        self.add_system_message(format!("forgot: {}", key));
-                    }
-                    Ok(false) => self.add_system_message(format!("no memory found for: {}", key)),
-                    Err(e) => self.add_system_message(format!("memory error: {}", e)),
-                }
-            }
-            return;
-        }
-
-        if let Some(key) = input.strip_prefix("/recall ") {
-            let key = key.trim();
-            if let Some(ref db) = self.db {
-                match AgentMemory::recall(db, key) {
-                    Some(value) => self.add_system_message(format!("{} = {}", key, value)),
-                    None => self.add_system_message(format!("no memory for: {}", key)),
-                }
-            }
-            return;
-        }
-
-        if input == "/memory" {
-            if let Some(ref db) = self.db {
-                self.agent_memory.load(db);
-            }
-            let entries = self.agent_memory.all_entries();
-            if entries.is_empty() {
-                self.add_system_message("agent memory is empty. use /remember key = value");
-            } else {
-                let lines: Vec<String> = entries
-                    .iter()
-                    .map(|e| format!("  {} = {} [{}]", e.key, truncate(&e.value, 60), e.kind.as_str_pub()))
-                    .collect();
-                self.add_system_message(format!("agent memory ({} entries):\n{}", entries.len(), lines.join("\n")));
-            }
-            return;
-        }
-
-        if input == "/pin" {
-            let last_idx = self.messages.len().saturating_sub(1);
-            if !self.pinned_messages.contains(&last_idx) {
-                self.pinned_messages.push(last_idx);
-                self.add_system_message(format!("pinned message #{}", last_idx));
-            } else {
-                self.add_system_message("last message already pinned");
-            }
-            return;
-        }
-
-        if input == "/unpin" {
-            if let Some(idx) = self.pinned_messages.pop() {
-                self.add_system_message(format!("unpinned message #{}", idx));
-            } else {
-                self.add_system_message("no pinned messages");
-            }
-            return;
-        }
-
-        if input == "/stream" || input == "/streaming" {
-            self.add_system_message("streaming is enabled for all non-tool-use prompts. responses appear character-by-character.");
-            return;
-        }
-
-        if let Some(command) = parse_shell_command(&input) {
-            self.start_shell(command.to_string());
             return;
         }
 
         self.start_ai(input);
+    }
+
+    /// Build the palette entry list (registry commands + dynamic actions for
+    /// effects, games, layouts, and providers) and open the overlay.
+    fn open_palette(&mut self) {
+        let mut entries: Vec<PaletteEntry> = Vec::with_capacity(64);
+        for spec in commands::REGISTRY {
+            entries.push(PaletteEntry::for_command(spec));
+        }
+        for name in self.effects.names() {
+            entries.push(PaletteEntry::effect(name));
+        }
+        for kind in GameKind::ALL {
+            entries.push(PaletteEntry::game(kind));
+        }
+        for preset in LayoutPreset::ALL {
+            entries.push(PaletteEntry::layout(preset));
+        }
+        for provider in palette::PROVIDERS {
+            entries.push(PaletteEntry::provider(provider));
+        }
+        self.palette.open(entries);
+        self.status_note = "palette: type to filter // Enter runs // Esc closes".to_string();
+    }
+
+    /// Execute a palette entry after the overlay closes.
+    fn run_palette_action(&mut self, action: EntryAction, title: &str) {
+        match action {
+            EntryAction::Command { id, args } => self.run_command(id, args),
+            EntryAction::Insert(text) => {
+                self.input = text;
+                self.status_note = format!("{} — type the argument, then Enter", title);
+            }
+            EntryAction::Effect(name) => {
+                if self.effects.set_by_name(name) {
+                    self.add_system_message(format!("3D effect: {}", self.effects.current_name()));
+                    self.status_note = format!("3D fx: {}", self.effects.current_name());
+                }
+            }
+            EntryAction::Game(kind) => {
+                self.ensure_games_visible();
+                self.games.launch(kind);
+                self.status_note = self.games.status_note().to_string();
+            }
+            EntryAction::Layout(preset) => {
+                self.tiling.apply_preset(preset);
+                self.status_note = format!("layout: {}", preset.name());
+            }
+            EntryAction::Provider(provider) => {
+                self.set_provider(provider, "palette route");
+            }
+        }
+    }
+
+    /// Make sure a Games tile is on screen: focus an existing one, or apply
+    /// the Arcade preset when no tile currently shows Games.
+    fn ensure_games_visible(&mut self) {
+        let existing = self
+            .tiling
+            .leaves()
+            .into_iter()
+            .find(|(_, panel)| *panel == PanelKind::Games);
+        match existing {
+            Some((id, _)) => self.tiling.focused = id,
+            None => {
+                self.tiling.apply_preset(LayoutPreset::Arcade);
+                self.add_system_message("layout: ARCADE");
+            }
+        }
+    }
+
+    /// Execute one registry command. This match is EXHAUSTIVE over CommandId
+    /// (no wildcard arm), so adding a registry entry without a dispatch
+    /// branch here is a compile error — registry and dispatcher cannot drift.
+    fn run_command(&mut self, id: CommandId, args: &str) {
+        match id {
+            CommandId::Help => {
+                self.show_help = !self.show_help;
+                if self.show_help {
+                    self.help_scroll = 0;
+                }
+            }
+            CommandId::Clear => {
+                self.messages.clear();
+                self.reveal_queue.clear();
+                self.status_note = "transcript purged".to_string();
+            }
+            CommandId::Video => {
+                self.video_enabled = !self.video_enabled;
+                self.status_note = if self.video_enabled {
+                    "video bus online".to_string()
+                } else {
+                    "video bus muted".to_string()
+                };
+            }
+            CommandId::Youtube => {
+                let url = args.to_string();
+                if url.is_empty() {
+                    self.add_system_message("usage: /youtube https://youtube.com/watch?v=...");
+                    return;
+                }
+                self.pending_video_load = true;
+                self.status_note = "youtube stream resolving".to_string();
+                self.add_system_message(format!(
+                    "youtube stream requested: {}",
+                    truncate(&url, 72)
+                ));
+                let tx = self.events_tx.clone();
+                tokio::spawn(async move {
+                    let event = match resolve_youtube_stream(url).await {
+                        Ok(video) => AppEvent::YoutubeReady {
+                            title: video.title,
+                            source: video.source,
+                        },
+                        Err(error) => AppEvent::YoutubeFailed {
+                            error: error.to_string(),
+                        },
+                    };
+                    let _ = tx.send(event);
+                });
+            }
+            CommandId::Webcam => {
+                if self.webcam.is_some() {
+                    self.webcam = None;
+                    self.webcam_frame = None;
+                    self.add_system_message("webcam offline");
+                } else {
+                    let config = self.webcam_config();
+                    match WebcamCapture::start(config) {
+                        Ok(cam) => {
+                            self.webcam = Some(cam);
+                            self.add_system_message("webcam online: live ascii feed active");
+                        }
+                        Err(e) => self.add_system_message(format!("webcam error: {}", e)),
+                    }
+                }
+            }
+
+            CommandId::Effects => {
+                self.effects.active = !self.effects.active;
+                self.status_note = if self.effects.active {
+                    format!("3D fx: {}", self.effects.current_name())
+                } else {
+                    "3D fx offline".to_string()
+                };
+            }
+            CommandId::Fx => {
+                if !args.is_empty() {
+                    if self.effects.set_by_name(args) {
+                        self.add_system_message(format!(
+                            "3D effect: {}",
+                            self.effects.current_name()
+                        ));
+                        self.status_note = format!("3D fx: {}", self.effects.current_name());
+                    } else {
+                        self.add_system_message(format!(
+                            "unknown effect '{}' -- available: {}",
+                            args,
+                            self.effects.names().join(", ")
+                        ));
+                    }
+                    return;
+                }
+                self.effects.cycle_with_off();
+                if self.effects.active {
+                    self.add_system_message(format!("3D effect: {}", self.effects.current_name()));
+                } else {
+                    self.add_system_message("3D effects offline");
+                }
+            }
+            CommandId::Randomize => {
+                theme::set_random_theme();
+                self.add_system_message(
+                    "color palette randomized -- /theme reset to restore defaults",
+                );
+                self.status_note = "theme randomized".to_string();
+            }
+            CommandId::Theme => match args.to_lowercase().as_str() {
+                "random" | "randomize" => self.run_command(CommandId::Randomize, ""),
+                "reset" | "default" => {
+                    theme::reset_theme();
+                    self.add_system_message("theme restored to factory defaults");
+                    self.status_note = "theme reset".to_string();
+                }
+                _ => {
+                    self.add_system_message("usage: /theme random|reset");
+                }
+            },
+            CommandId::Analytics => {
+                self.analytics.active = !self.analytics.active;
+                if self.analytics.active {
+                    self.analytics.refresh(self.db.as_ref());
+                    self.tiling.set_focused_panel(PanelKind::Analytics);
+                }
+            }
+
+            CommandId::Layout => {
+                if args.is_empty() {
+                    let preset = self.tiling.preset.cycle();
+                    self.tiling.apply_preset(preset);
+                    self.add_system_message(format!("layout: {}", preset.name()));
+                    return;
+                }
+                let preset = match args.to_lowercase().as_str() {
+                    "default" => LayoutPreset::Default,
+                    "dual" => LayoutPreset::DualPane,
+                    "triple" => LayoutPreset::TripleColumn,
+                    "quad" => LayoutPreset::Quad,
+                    "webcam" | "cam" => LayoutPreset::WebcamFocus,
+                    "focus" | "full" => LayoutPreset::FullFocus,
+                    "videochat" | "vc" => LayoutPreset::VideoChat,
+                    "arcade" | "games" => LayoutPreset::Arcade,
+                    _ => {
+                        self.add_system_message(
+                            "layouts: default, dual, triple, quad, webcam, focus, videochat, arcade",
+                        );
+                        return;
+                    }
+                };
+                self.tiling.apply_preset(preset);
+                self.add_system_message(format!("layout: {}", preset.name()));
+            }
+            CommandId::Sysmon => {
+                self.tiling.set_focused_panel(PanelKind::SystemMonitor);
+            }
+            CommandId::Games => {
+                if args.is_empty() {
+                    // bare /games: bring the arcade up — Arcade preset when no
+                    // Games tile is visible, else focus the existing one
+                    self.ensure_games_visible();
+                    self.status_note = self.games.status_note().to_string();
+                    return;
+                }
+                match args.to_lowercase().as_str() {
+                    "menu" | "select" | "stop" => {
+                        self.games.stop();
+                        self.tiling.set_focused_panel(PanelKind::Games);
+                        self.status_note = self.games.status_note().to_string();
+                    }
+                    "play" | "start" => {
+                        self.games.activate_selected();
+                        self.tiling.set_focused_panel(PanelKind::Games);
+                        self.status_note = self.games.status_note().to_string();
+                    }
+                    "next" => {
+                        self.games.next_game();
+                        self.tiling.set_focused_panel(PanelKind::Games);
+                        self.status_note = self.games.status_note().to_string();
+                    }
+                    "prev" | "previous" => {
+                        self.games.previous_game();
+                        self.tiling.set_focused_panel(PanelKind::Games);
+                        self.status_note = self.games.status_note().to_string();
+                    }
+                    _ => {
+                        if let Some(game) = GameKind::from_input(args) {
+                            self.ensure_games_visible();
+                            self.games.launch(game);
+                            self.status_note = self.games.status_note().to_string();
+                        } else {
+                            self.add_system_message(
+                                "games: /games, /games play, /games menu, /games next, /games pacman|space|penguin|pong|tron|snake|breakout",
+                            );
+                        }
+                    }
+                }
+            }
+            CommandId::Tiles => {
+                let count = if args.is_empty() {
+                    2
+                } else {
+                    match args.parse::<usize>() {
+                        Ok(count @ 1..=8) => count,
+                        _ => {
+                            self.add_system_message("tiles: /tiles or /tiles <1-8>");
+                            return;
+                        }
+                    }
+                };
+                match self.tiles.activate_count(count) {
+                    Ok(()) => {
+                        self.tiling.set_focused_panel(PanelKind::Tiles);
+                        self.status_note = self.tiles.status_note().to_string();
+                    }
+                    Err(error) => {
+                        self.add_system_message(format!("tiles error: {}", error));
+                        self.status_note = "tiles failed to boot".to_string();
+                    }
+                }
+            }
+
+            CommandId::Server => {
+                if let Ok(port) = args.parse::<u16>() {
+                    if self.start_chat_server(port) {
+                        self.add_system_message(format!(
+                            "video chat server live on 0.0.0.0:{} -- /host does this plus auto-join",
+                            port
+                        ));
+                        self.status_note = format!("video chat server live on :{}", port);
+                    }
+                } else {
+                    self.add_system_message("usage: /server <port>");
+                }
+            }
+            CommandId::Host => {
+                let port = if args.is_empty() {
+                    Some(9999)
+                } else {
+                    args.parse::<u16>().ok()
+                };
+                let Some(port) = port else {
+                    self.add_system_message("usage: /host [port]   (default 9999)");
+                    return;
+                };
+                if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                    self.add_system_message("already in a room -- /disconnect first");
+                    return;
+                }
+                if self.start_chat_server(port) {
+                    self.start_video_client(format!("ws://127.0.0.1:{}", port));
+                    self.print_room_invite();
+                    self.status_note = format!("hosting room on :{}", port);
+                }
+            }
+            CommandId::Join => {
+                let code = args;
+                if code.is_empty() {
+                    self.add_system_message(
+                        "usage: /join <room-code>   (get one from a /host friend)",
+                    );
+                    return;
+                }
+                match roomcode::decode(code) {
+                    Some(addr) => {
+                        if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                            self.add_system_message("already in a room -- /disconnect first");
+                            return;
+                        }
+                        self.add_system_message(format!(
+                            "joining room {} ({}) as {}",
+                            code.to_uppercase(),
+                            addr,
+                            self.username
+                        ));
+                        self.start_video_client(format!("ws://{}", addr));
+                    }
+                    None => {
+                        self.add_system_message(
+                            "that room code didn't parse -- expected something like K7QM3-XZ2AB",
+                        );
+                    }
+                }
+            }
+            CommandId::Invite => {
+                self.print_room_invite();
+            }
+            CommandId::Disconnect => {
+                if let Some(vc) = self.video_chat.take() {
+                    vc.disconnect();
+                    if let Some(port) = self.chat_server_port {
+                        self.add_system_message(format!(
+                            "left the room (your server is still listening on :{})",
+                            port
+                        ));
+                    } else {
+                        self.add_system_message("left the room");
+                    }
+                    self.status_note = "video chat offline".to_string();
+                } else {
+                    self.add_system_message("not connected to video chat");
+                }
+            }
+            CommandId::Connect => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /connect ws://<addr>:<port>");
+                    return;
+                }
+                let url = if args.contains("://") {
+                    args.to_string()
+                } else {
+                    format!("ws://{}", args)
+                };
+                if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                    self.add_system_message("already in a room -- /disconnect first");
+                    return;
+                }
+                self.add_system_message(format!("connecting to {} as {}", url, self.username));
+                self.start_video_client(url);
+            }
+            CommandId::Chat => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /chat <message>");
+                    return;
+                }
+                match self.video_chat {
+                    Some(ref vc) if vc.is_connected() => {
+                        vc.send_chat(args.to_string());
+                    }
+                    _ => {
+                        self.add_system_message(
+                            "not connected to video chat. use /host, /join <code>, or /connect ws://<addr>",
+                        );
+                    }
+                }
+            }
+            CommandId::Username => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /username <name>");
+                    return;
+                }
+                self.username = args.to_string();
+                if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                    self.add_system_message(format!(
+                        "username set to: {} (applies to your next connection)",
+                        self.username
+                    ));
+                } else {
+                    self.add_system_message(format!("username set to: {}", self.username));
+                }
+            }
+
+            CommandId::Provider => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /provider claude|grok|gpt|gemini|ollama");
+                    return;
+                }
+                self.set_provider(AIProvider::from_input(args), "manual route");
+            }
+            CommandId::Ollama => {
+                self.set_provider(AIProvider::Ollama, "manual route");
+            }
+            CommandId::Trust => {
+                self.trust_level = self.trust_level.cycle();
+                self.add_system_message(format!("trust level: {}", self.trust_level.name()));
+                self.status_note = format!("trust: {}", self.trust_level.name());
+            }
+            CommandId::Remember => {
+                if let Some((key, value)) = args.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    if let Some(ref db) = self.db {
+                        match AgentMemory::remember(db, key, value, memory::MemoryKind::UserSet) {
+                            Ok(_) => {
+                                self.agent_memory.load(db);
+                                self.add_system_message(format!("remembered: {} = {}", key, value));
+                            }
+                            Err(e) => self.add_system_message(format!("memory error: {}", e)),
+                        }
+                    } else {
+                        self.add_system_message("memory offline: database not available");
+                    }
+                } else {
+                    self.add_system_message("usage: /remember key = value");
+                }
+            }
+            CommandId::Forget => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /forget <key>");
+                    return;
+                }
+                if let Some(ref db) = self.db {
+                    match AgentMemory::forget(db, args) {
+                        Ok(true) => {
+                            self.agent_memory.load(db);
+                            self.add_system_message(format!("forgot: {}", args));
+                        }
+                        Ok(false) => {
+                            self.add_system_message(format!("no memory found for: {}", args))
+                        }
+                        Err(e) => self.add_system_message(format!("memory error: {}", e)),
+                    }
+                }
+            }
+            CommandId::Recall => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /recall <key>");
+                    return;
+                }
+                if let Some(ref db) = self.db {
+                    match AgentMemory::recall(db, args) {
+                        Some(value) => self.add_system_message(format!("{} = {}", args, value)),
+                        None => self.add_system_message(format!("no memory for: {}", args)),
+                    }
+                }
+            }
+            CommandId::Memory => {
+                if let Some(ref db) = self.db {
+                    self.agent_memory.load(db);
+                }
+                let entries = self.agent_memory.all_entries();
+                if entries.is_empty() {
+                    self.add_system_message("agent memory is empty. use /remember key = value");
+                } else {
+                    let lines: Vec<String> = entries
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "  {} = {} [{}]",
+                                e.key,
+                                truncate(&e.value, 60),
+                                e.kind.as_str_pub()
+                            )
+                        })
+                        .collect();
+                    self.add_system_message(format!(
+                        "agent memory ({} entries):\n{}",
+                        entries.len(),
+                        lines.join("\n")
+                    ));
+                }
+            }
+            CommandId::Pin => {
+                let last_idx = self.messages.len().saturating_sub(1);
+                if !self.pinned_messages.contains(&last_idx) {
+                    self.pinned_messages.push(last_idx);
+                    self.add_system_message(format!("pinned message #{}", last_idx));
+                } else {
+                    self.add_system_message("last message already pinned");
+                }
+            }
+            CommandId::Unpin => {
+                if let Some(idx) = self.pinned_messages.pop() {
+                    self.add_system_message(format!("unpinned message #{}", idx));
+                } else {
+                    self.add_system_message("no pinned messages");
+                }
+            }
+            CommandId::Stream => {
+                self.add_system_message(
+                    "streaming is enabled for all non-tool-use prompts. responses appear character-by-character.",
+                );
+            }
+            CommandId::Run => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /run <command>   (or !<command>)");
+                    return;
+                }
+                self.start_shell(args.to_string());
+            }
+            CommandId::Curl => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /curl <args>");
+                    return;
+                }
+                self.start_shell(format!("curl {}", args));
+            }
+            CommandId::Brew => {
+                if args.is_empty() {
+                    self.add_system_message("usage: /brew <args>");
+                    return;
+                }
+                self.start_shell(format!("brew {}", args));
+            }
+        }
     }
 
     fn start_ai(&mut self, input: String) {
@@ -1942,6 +2143,63 @@ impl App {
         self.messages.push(message);
     }
 
+    /// Games <-> network glue, run every tick.
+    ///
+    /// While a video chat connection is live, GamesPanel holds an outbound
+    /// `(game, payload)` sender; this method (1) wires/unwires that sender as
+    /// the connection comes and goes, (2) refreshes my_id when the server's
+    /// Welcome lands after the link flips connected, (3) pumps outbound game
+    /// payloads onto the wire, and (4) drains the inbound game inbox into
+    /// GamesPanel::handle_net.
+    fn sync_game_net(&mut self) {
+        let connected = self
+            .video_chat
+            .as_ref()
+            .map_or(false, |vc| vc.is_connected());
+
+        if connected {
+            let my_id = self.video_chat.as_ref().and_then(|vc| vc.my_id());
+            if self.game_net_tx.is_none() {
+                let (tx, rx) = mpsc::unbounded_channel();
+                self.games.set_net(Some(tx.clone()), my_id.clone());
+                self.game_net_tx = Some(tx);
+                self.game_net_rx = Some(rx);
+                self.game_net_my_id = my_id;
+            } else if my_id != self.game_net_my_id {
+                // Welcome (our id) arrived after connect: refresh in place,
+                // keeping the existing channel so no queued payload is lost.
+                self.games.set_net(self.game_net_tx.clone(), my_id.clone());
+                self.game_net_my_id = my_id;
+            }
+        } else if self.game_net_tx.is_some() {
+            self.games.set_net(None, None);
+            self.game_net_tx = None;
+            self.game_net_rx = None;
+            self.game_net_my_id = None;
+        }
+
+        // outbound: games -> wire
+        if let Some(rx) = self.game_net_rx.as_mut() {
+            while let Ok((game, payload)) = rx.try_recv() {
+                if let Some(vc) = &self.video_chat {
+                    vc.send_game(&game, payload);
+                }
+            }
+        }
+
+        // inbound: wire -> games (drain even when no session is running so
+        // lobby invites surface in the selector)
+        let inbound = self
+            .video_chat
+            .as_ref()
+            .map(|vc| vc.drain_game_inbox())
+            .unwrap_or_default();
+        for msg in inbound {
+            self.games
+                .handle_net(&msg.from_id, &msg.from_name, &msg.game, &msg.payload);
+        }
+    }
+
     /// Adapt VideoChatClient lifecycle events into AppEvents so the tick
     /// loop can surface them via status_note + transcript (never eprintln!).
     fn net_event_hook(&self) -> impl Fn(NetEvent) + Send + Sync + 'static {
@@ -1990,7 +2248,8 @@ impl App {
                 }
             }
         });
-        self.tiling.set_focused_panel(PanelKind::VideoChatFeeds);
+        // Room view: feeds + chat stream + roster, transcript kept visible.
+        self.tiling.apply_preset(LayoutPreset::VideoChat);
         self.status_note = "video chat connecting...".to_string();
     }
 
@@ -2444,6 +2703,9 @@ impl App {
         if self.show_ollama_picker {
             self.render_ollama_overlay(frame, area);
         }
+
+        // topmost overlay: the command palette
+        self.palette.render(frame, area);
     }
 
     fn render_tile_panel(
@@ -2851,37 +3113,30 @@ impl App {
             vertical: 1,
         });
 
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "!<cmd>         raw shell",
-                Style::default().fg(t().text),
-            )),
-            Line::from(Span::styled(
-                "/server <port> host video chat",
-                Style::default().fg(t().text),
-            )),
-            Line::from(Span::styled(
-                "/connect <url> join video chat",
-                Style::default().fg(t().text),
-            )),
-            Line::from(Span::styled(
-                "/webcam /3d /fx /analytics /games /tiles [1-8]",
-                Style::default().fg(t().text),
-            )),
-            Line::from(Span::styled(
-                "/provider <name> /ollama switch ai route or local model picker",
-                Style::default().fg(t().text),
-            )),
-            Line::from(Span::styled(
-                "/youtube <url> stream YouTube into video bus",
-                Style::default().fg(t().text),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "recent ops:",
-                Style::default().fg(t().accent2).bold(),
-            )),
-        ];
+        // cheatsheet: featured commands straight from the registry
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Ctrl+P", Style::default().fg(t().accent2).bold()),
+            Span::styled(" palette   ", Style::default().fg(t().text)),
+            Span::styled("!<cmd>", Style::default().fg(t().accent2).bold()),
+            Span::styled(" raw shell", Style::default().fg(t().text)),
+        ])];
+        for spec in commands::featured() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<18}", truncate(spec.usage, 18)),
+                    Style::default().fg(t().accent4),
+                ),
+                Span::styled(
+                    truncate(spec.description, inner.width.saturating_sub(19) as usize),
+                    Style::default().fg(t().text),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "recent ops:",
+            Style::default().fg(t().accent2).bold(),
+        )));
 
         if self.recent_commands.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -3169,7 +3424,7 @@ impl App {
                 Span::styled("> ", Style::default().fg(t().accent4).bold()),
                 Span::styled(
                     if self.input.is_empty() {
-                        "prompt, !bash, @file, /ollama, /games, /tiles, /trust, /remember ..."
+                        "Ctrl+P palette // prompt, !bash, @file, /host, /games, /fx ..."
                     } else {
                         self.input.as_str()
                     },
@@ -3181,7 +3436,7 @@ impl App {
                 Span::styled("mode: ", Style::default().fg(t().accent2).bold()),
                 Span::styled(status, Style::default().fg(status_color)),
                 Span::styled(
-                    format!("  |  {}  |  F1 help  F2 ai  F4 fx  F5 cam  F6 layout  F7 tiles  F8 panel", trust_tag),
+                    format!("  |  {}  |  ctrl+p palette  F1 help  F2 ai  F4 fx  F5 cam  F6 layout  F7 tiles", trust_tag),
                     Style::default().fg(t().muted),
                 ),
             ]),
@@ -3305,127 +3560,145 @@ impl App {
         );
     }
 
-    fn render_help_overlay(&self, frame: &mut Frame, area: Rect) {
-        let popup = centered_area(area, 78, 75);
+    /// Help overlay, generated from the command registry (grouped by
+    /// category) plus a KEYS section and the live effects/games rosters.
+    /// Scrollable: PgUp/PgDn/arrows/j/k while open, Esc or F1 closes.
+    fn render_help_overlay(&mut self, frame: &mut Frame, area: Rect) {
+        let popup = centered_area(area, 78, 80);
         frame.render_widget(Clear, popup);
         let block = Block::default()
-            .title(" HELP // ASCIIVISION v2 OPERATIONS MANUAL ")
+            .title(" HELP // ASCIIVISION v3 OPERATIONS MANUAL ")
             .title_style(Style::default().fg(t().accent1).bold())
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, popup);
 
-        let text = Text::from(vec![
+        let header = |label: &str| {
+            Line::from(Span::styled(
+                label.to_string(),
+                Style::default().fg(t().accent4).bold(),
+            ))
+        };
+        let entry = |usage: &str, description: &str| {
             Line::from(vec![
-                Span::styled("PROMPTS    ", Style::default().fg(t().accent2).bold()),
-                Span::styled("plain text goes to the active AI provider; Ollama opens a local model picker", Style::default().fg(t().text)),
-            ]),
+                Span::styled(
+                    format!("  {:<26} ", usage),
+                    Style::default().fg(t().accent2).bold(),
+                ),
+                Span::styled(description.to_string(), Style::default().fg(t().text)),
+            ])
+        };
+
+        let mut lines: Vec<Line> = vec![
             Line::from(vec![
-                Span::styled("SHELL      ", Style::default().fg(t().accent2).bold()),
-                Span::styled("prefix with ! to execute locally: !ls, !git status, !curl ...", Style::default().fg(t().text)),
+                Span::styled(
+                    "Ctrl+P opens the command palette",
+                    Style::default().fg(t().accent2).bold(),
+                ),
+                Span::styled(
+                    " — fuzzy-search everything below. Plain text goes to the AI; !<cmd> runs shell.",
+                    Style::default().fg(t().text),
+                ),
             ]),
-            Line::from(vec![
-                Span::styled("VIDEO CHAT ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/server <port>, /connect ws://<addr>, /chat <msg>", Style::default().fg(t().text)),
-            ]),
-            Line::from(vec![
-                Span::styled("VIDEO BUS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/video toggles the panel, /youtube <url> streams YouTube into it", Style::default().fg(t().text)),
-            ]),
-            Line::from(vec![
-                Span::styled("WEBCAM     ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/webcam or F5 to toggle live ASCII webcam feed", Style::default().fg(t().text)),
-            ]),
-            Line::from(vec![
-                Span::styled("3D EFFECTS ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/3d toggles, /fx or F4 cycle matrix -> plasma -> starfield -> wireframe -> fire -> particles -> off", Style::default().fg(t().text)),
-            ]),
-            Line::from(vec![
-                Span::styled("ANALYTICS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/analytics opens the live conversation stats dashboard", Style::default().fg(t().text)),
-            ]),
-            Line::from(vec![
-                Span::styled("GAMES      ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/games loads the arcade panel; 1-3 launches Pac-Man, Space Invaders, or 3D Penguin", Style::default().fg(t().text)),
-            ]),
-            Line::from(vec![
-                Span::styled("TILES      ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/tiles or /tiles <1-8> boots real PTY terminals inside a focused tile; Ctrl+j/k cycle inner terminals, Ctrl+h/l move app focus", Style::default().fg(t().text)),
-            ]),
-            Line::from(vec![
-                Span::styled("SHORTCUTS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/curl, /brew, /provider, /ollama, /video, /youtube, /clear, /help, /username, /games, /tiles", Style::default().fg(t().text)),
-            ]),
+            Line::from(Span::styled(
+                "PgUp/PgDn, arrows, or j/k scroll this manual. Esc or F1 closes it.",
+                Style::default().fg(t().muted),
+            )),
             Line::from(""),
-            Line::from(Span::styled("Keyboard", Style::default().fg(t().accent4).bold())),
-            Line::from("  F1       toggle this overlay"),
-            Line::from("  F2       cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama)"),
-            Line::from("  F3       toggle live video panel"),
-            Line::from("  F4       cycle 3D effects, then off, then repeat"),
-            Line::from("  F5       toggle webcam capture"),
-            Line::from("  F6       cycle tiling layout preset"),
-            Line::from("  F7       boot/focus the Tiles PTY panel"),
-            Line::from("  F8       cycle focused tile panel type"),
-            Line::from("  F9       randomize color theme"),
-            Line::from("  F10      reset theme to defaults"),
-            Line::from("  Ctrl+L   clear transcript"),
-            Line::from("  PgUp/Dn  scroll transcript"),
-            Line::from("  Esc      exit"),
-            Line::from(""),
-            Line::from(Span::styled("Tiling (Hyprland-style)", Style::default().fg(t().accent4).bold())),
-            Line::from("  Ctrl+h/l  focus tile left/right"),
-            Line::from("  Ctrl+j/k  focus tile down/up"),
-            Line::from("  Ctrl+H/L  swap tile left/right (shift)"),
-            Line::from("  Ctrl+J/K  swap tile down/up (shift)"),
-            Line::from("  Ctrl+[/]  resize focused split narrower/wider"),
-            Line::from("  Ctrl+n    cycle focused tile to next panel type"),
-            Line::from("  /layout  cycle layout (default, dual, triple, quad, webcam, focus)"),
-            Line::from("  Games     focus arcade tile and use 1-3 / WASD / Esc / R"),
-            Line::from("  Tiles     focus PTY tile and type directly; Ctrl+j/k cycle inner terminals, Ctrl+h/l move app focus"),
-            Line::from(""),
-            Line::from(Span::styled("Modules", Style::default().fg(t().accent4).bold())),
-            Line::from("  AI Chat: Claude 4.5, Grok 4, GPT-5, Gemini 3 Flash, local Ollama models"),
-            Line::from("  Video: MP4 ASCII playback | Webcam: Live camera ASCII feed"),
-            Line::from("  Video Chat: WebSocket multi-user streaming"),
-            Line::from("  3D FX: matrix, plasma, starfield, wireframe, fire, particles"),
-            Line::from("  Games: Pac-Man, Space Invaders, 3D Penguin"),
-            Line::from("  Tiles: 1-8 live PTY terminals for codex / claude / gemini / shell work"),
-            Line::from("  Sys Monitor: CPU, memory, swap, network, load average"),
-            Line::from("  Analytics: Real-time conversation statistics"),
-            Line::from("  Shell: Full bash, curl, brew integration"),
-        ]);
+        ];
+
+        // command sections, straight from the registry
+        for category in commands::Category::ALL {
+            lines.push(header(category.name()));
+            for spec in commands::in_category(category) {
+                let description = if spec.aliases.is_empty() {
+                    spec.description.to_string()
+                } else {
+                    format!("{} (alias {})", spec.description, spec.aliases.join(", "))
+                };
+                lines.push(entry(spec.usage, &description));
+            }
+            lines.push(Line::from(""));
+        }
+
+        lines.push(header("KEYS"));
+        for (key, what) in [
+            ("Ctrl+P", "command palette (fuzzy search everything)"),
+            ("F1", "toggle this manual"),
+            ("F2", "cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama)"),
+            ("F3", "toggle live video panel"),
+            ("F4", "cycle 3D effects (includes off)"),
+            ("F5", "toggle webcam capture"),
+            ("F6", "cycle tiling layout preset"),
+            ("F7", "boot/focus the Tiles PTY panel"),
+            ("F8", "cycle focused tile panel type"),
+            ("F9", "randomize color theme"),
+            ("F10", "reset theme to defaults"),
+            ("Ctrl+L", "clear transcript"),
+            ("PgUp/PgDn", "scroll transcript"),
+            ("Esc Esc", "quit (press twice within half a second)"),
+        ] {
+            lines.push(entry(key, what));
+        }
+        lines.push(Line::from(""));
+
+        lines.push(header("TILING (Hyprland-style)"));
+        for (key, what) in [
+            ("Ctrl+h/l", "focus tile left/right"),
+            ("Ctrl+j/k", "focus tile down/up (cycles PTYs inside Tiles)"),
+            ("Ctrl+H/J/K/L", "swap tiles (shift)"),
+            ("Ctrl+[/]", "resize focused split"),
+            ("Ctrl+n", "cycle focused tile to the next panel type"),
+        ] {
+            lines.push(entry(key, what));
+        }
+        lines.push(Line::from(""));
+
+        lines.push(header("GAMES (focus the arcade tile, prompt empty)"));
+        for (key, what) in [
+            ("1-7", "launch a game directly"),
+            ("WASD/arrows", "select + play"),
+            ("Enter/Space", "launch selected"),
+            ("R", "restart session"),
+            ("Esc", "back to selector"),
+        ] {
+            lines.push(entry(key, what));
+        }
+        let roster: Vec<String> = GameKind::ALL
+            .iter()
+            .map(|kind| {
+                if kind.multiplayer() {
+                    format!("{} [MP]", kind.label())
+                } else {
+                    kind.label().to_string()
+                }
+            })
+            .collect();
+        lines.push(entry("roster", &roster.join(", ")));
+        lines.push(entry(
+            "online play",
+            "/host (or /join <code>), open Pong/Tron, pick HOST or JOIN ONLINE",
+        ));
+        lines.push(Line::from(""));
+
+        lines.push(header("3D EFFECTS"));
+        lines.push(entry("ring", &self.effects.names().join(", ")));
+
+        let inner = popup.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        let max_scroll = lines.len().saturating_sub(inner.height as usize);
+        self.help_scroll = self.help_scroll.min(max_scroll);
 
         frame.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(Text::from(lines))
                 .wrap(Wrap { trim: false })
+                .scroll((self.help_scroll as u16, 0))
                 .style(Style::default().fg(t().text).bg(t().panel_bg)),
-            popup.inner(Margin {
-                horizontal: 2,
-                vertical: 1,
-            }),
+            inner,
         );
-    }
-}
-
-fn parse_shell_command(input: &str) -> Option<&str> {
-    if let Some(rest) = input.strip_prefix('!') {
-        let command = rest.trim();
-        if command.is_empty() {
-            None
-        } else {
-            Some(command)
-        }
-    } else if let Some(rest) = input.strip_prefix("/run ") {
-        Some(rest.trim())
-    } else if let Some(rest) = input.strip_prefix("/bash ") {
-        Some(rest.trim())
-    } else if let Some(rest) = input.strip_prefix("/curl ") {
-        Some(input.strip_prefix("/").unwrap_or(rest).trim())
-    } else if let Some(rest) = input.strip_prefix("/brew ") {
-        Some(input.strip_prefix("/").unwrap_or(rest).trim())
-    } else {
-        None
     }
 }
 

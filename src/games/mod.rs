@@ -220,7 +220,6 @@ impl GamesPanel {
 
     /// Inject (or clear) the outbound network sender used by online games.
     /// `tx` carries `(game_name, payload)` pairs; `my_id` is our connection id.
-    #[allow(dead_code)] // called by the stage-2 games<->network glue
     pub fn set_net(
         &mut self,
         tx: Option<tokio::sync::mpsc::UnboundedSender<(String, serde_json::Value)>>,
@@ -230,7 +229,6 @@ impl GamesPanel {
     }
 
     /// Inbound game payload from the network layer.
-    #[allow(dead_code)] // called by the stage-2 games<->network glue
     pub fn handle_net(
         &mut self,
         from_id: &str,
