@@ -12,6 +12,7 @@ use ratatui::{
 use serde::Deserialize;
 use std::{
     collections::VecDeque,
+    net::SocketAddrV4,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -26,6 +27,7 @@ mod effects;
 mod games;
 mod memory;
 mod message;
+mod roomcode;
 mod server;
 mod shell;
 mod sysmon;
@@ -41,7 +43,7 @@ use ai::{
     Message as ApiMessage, OllamaModelInfo, StreamChunk,
 };
 use analytics::AnalyticsPanel;
-use client::VideoChatClient;
+use client::{NetEvent, VideoChatClient};
 use db::Database;
 use effects::EffectsEngine;
 use games::{GameKind, GamesPanel};
@@ -203,6 +205,15 @@ enum AppEvent {
         tool_calls: Vec<ToolCall>,
         context: Vec<ApiMessage>,
     },
+    NetStatus {
+        message: String,
+    },
+    NetUserJoined {
+        username: String,
+    },
+    NetUserLeft {
+        username: String,
+    },
 }
 
 struct App {
@@ -247,7 +258,10 @@ struct App {
     sysmon: SystemMonitor,
     webcam: Option<WebcamCapture>,
     webcam_frame: Option<video::AsciiFrame>,
-    video_chat: Option<VideoChatClient>,
+    video_chat: Option<Arc<VideoChatClient>>,
+    /// hosted video chat server handle, if this instance is hosting
+    chat_server: Option<Arc<VideoChatServer>>,
+    chat_server_port: Option<u16>,
     username: String,
     /// cached body area for tiling direction calculations
     body_area: Rect,
@@ -417,6 +431,8 @@ impl App {
             webcam,
             webcam_frame: None,
             video_chat: None,
+            chat_server: None,
+            chat_server_port: None,
             username: args.username.clone(),
             body_area: Rect::default(),
 
@@ -1042,6 +1058,18 @@ impl App {
                         self.status_note = "ollama unavailable".to_string();
                     }
                 }
+                AppEvent::NetStatus { message } => {
+                    self.add_system_message(format!("videochat: {}", message));
+                    self.status_note = format!("vc: {}", truncate(&message, 44));
+                }
+                AppEvent::NetUserJoined { username } => {
+                    self.add_system_message(format!("videochat: {} joined the room", username));
+                    self.status_note = format!("{} joined", truncate(&username, 24));
+                }
+                AppEvent::NetUserLeft { username } => {
+                    self.add_system_message(format!("videochat: {} left the room", username));
+                    self.status_note = format!("{} left", truncate(&username, 24));
+                }
             }
         }
 
@@ -1551,53 +1579,134 @@ impl App {
 
         if let Some(port_str) = input.strip_prefix("/server ") {
             if let Ok(port) = port_str.trim().parse::<u16>() {
-                let addr = format!("0.0.0.0:{}", port);
-                self.add_system_message(format!("starting video chat server on {}", addr));
-                let server = Arc::new(VideoChatServer::new());
-                let addr_clone = addr.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = server.run(&addr_clone).await {
-                        eprintln!("server error: {}", e);
-                    }
-                });
-                self.status_note = format!("video chat server live on :{}", port);
+                if self.start_chat_server(port) {
+                    self.add_system_message(format!(
+                        "video chat server live on 0.0.0.0:{} -- /host does this plus auto-join",
+                        port
+                    ));
+                    self.status_note = format!("video chat server live on :{}", port);
+                }
             } else {
                 self.add_system_message("usage: /server <port>");
             }
             return;
         }
 
+        if input == "/host" || input.starts_with("/host ") {
+            let arg = input.strip_prefix("/host").unwrap_or("").trim();
+            let port = if arg.is_empty() {
+                Some(9999)
+            } else {
+                arg.parse::<u16>().ok()
+            };
+            let Some(port) = port else {
+                self.add_system_message("usage: /host [port]   (default 9999)");
+                return;
+            };
+            if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                self.add_system_message("already in a room -- /disconnect first");
+                return;
+            }
+            if self.start_chat_server(port) {
+                self.start_video_client(format!("ws://127.0.0.1:{}", port));
+                self.print_room_invite();
+                self.status_note = format!("hosting room on :{}", port);
+            }
+            return;
+        }
+
+        if input == "/join" || input.starts_with("/join ") {
+            let code = input.strip_prefix("/join").unwrap_or("").trim();
+            if code.is_empty() {
+                self.add_system_message("usage: /join <room-code>   (get one from a /host friend)");
+                return;
+            }
+            match roomcode::decode(code) {
+                Some(addr) => {
+                    if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                        self.add_system_message("already in a room -- /disconnect first");
+                        return;
+                    }
+                    self.add_system_message(format!(
+                        "joining room {} ({}) as {}",
+                        code.to_uppercase(),
+                        addr,
+                        self.username
+                    ));
+                    self.start_video_client(format!("ws://{}", addr));
+                }
+                None => {
+                    self.add_system_message(
+                        "that room code didn't parse -- expected something like K7QM3-XZ2AB",
+                    );
+                }
+            }
+            return;
+        }
+
+        if input == "/invite" {
+            self.print_room_invite();
+            return;
+        }
+
+        if input == "/disconnect" {
+            if let Some(vc) = self.video_chat.take() {
+                vc.disconnect();
+                if let Some(port) = self.chat_server_port {
+                    self.add_system_message(format!(
+                        "left the room (your server is still listening on :{})",
+                        port
+                    ));
+                } else {
+                    self.add_system_message("left the room");
+                }
+                self.status_note = "video chat offline".to_string();
+            } else {
+                self.add_system_message("not connected to video chat");
+            }
+            return;
+        }
+
         if let Some(url) = input.strip_prefix("/connect ") {
             let url = url.trim().to_string();
-            let username = self.username.clone();
-            let client = VideoChatClient::new(username.clone(), url.clone());
-            self.add_system_message(format!("connecting to {} as {}", url, username));
-            let status_arc = client.status.clone();
-            self.video_chat = Some(client);
-            // spawn connection using a fresh client that will manage its own Arc state
-            tokio::spawn(async move {
-                let temp_client = VideoChatClient::new(username, url);
-                if let Err(e) = temp_client.connect().await {
-                    *status_arc.write() = format!("connection failed: {}", e);
-                }
-            });
-            self.tiling.set_focused_panel(PanelKind::VideoChatFeeds);
-            self.status_note = "video chat connecting...".to_string();
+            let url = if url.contains("://") {
+                url
+            } else {
+                format!("ws://{}", url)
+            };
+            if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                self.add_system_message("already in a room -- /disconnect first");
+                return;
+            }
+            self.add_system_message(format!("connecting to {} as {}", url, self.username));
+            self.start_video_client(url);
             return;
         }
 
         if let Some(msg) = input.strip_prefix("/chat ") {
-            if let Some(ref vc) = self.video_chat {
-                vc.send_chat(msg.trim().to_string());
-            } else {
-                self.add_system_message("not connected to video chat. use /connect ws://<addr>");
+            match self.video_chat {
+                Some(ref vc) if vc.is_connected() => {
+                    vc.send_chat(msg.trim().to_string());
+                }
+                _ => {
+                    self.add_system_message(
+                        "not connected to video chat. use /host, /join <code>, or /connect ws://<addr>",
+                    );
+                }
             }
             return;
         }
 
         if let Some(name) = input.strip_prefix("/username ") {
             self.username = name.trim().to_string();
-            self.add_system_message(format!("username set to: {}", self.username));
+            if self.video_chat.as_ref().map_or(false, |c| c.is_connected()) {
+                self.add_system_message(format!(
+                    "username set to: {} (applies to your next connection)",
+                    self.username
+                ));
+            } else {
+                self.add_system_message(format!("username set to: {}", self.username));
+            }
             return;
         }
 
@@ -1816,6 +1925,128 @@ impl App {
     fn add_system_message(&mut self, content: impl Into<String>) {
         let message = ChatMessage::system(content);
         self.messages.push(message);
+    }
+
+    /// Adapt VideoChatClient lifecycle events into AppEvents so the tick
+    /// loop can surface them via status_note + transcript (never eprintln!).
+    fn net_event_hook(&self) -> impl Fn(NetEvent) + Send + Sync + 'static {
+        let events_tx = self.events_tx.clone();
+        move |event| {
+            let app_event = match event {
+                NetEvent::Connected { user_id } => AppEvent::NetStatus {
+                    message: format!(
+                        "link established (id {})",
+                        user_id.chars().take(8).collect::<String>()
+                    ),
+                },
+                NetEvent::Disconnected { reason } => AppEvent::NetStatus { message: reason },
+                NetEvent::UserJoined { username } => AppEvent::NetUserJoined { username },
+                NetEvent::UserLeft { username } => AppEvent::NetUserLeft { username },
+            };
+            let _ = events_tx.send(app_event);
+        }
+    }
+
+    /// Create, store, and actually connect a video chat client. The stored
+    /// Arc and the connecting instance are one and the same (this replaces
+    /// the old broken temp-client pattern).
+    fn start_video_client(&mut self, url: String) {
+        let client = Arc::new(VideoChatClient::new(self.username.clone(), url));
+        client.set_event_hook(self.net_event_hook());
+        self.video_chat = Some(Arc::clone(&client));
+        let events_tx = self.events_tx.clone();
+        tokio::spawn(async move {
+            // a couple of quick retries cover the /host self-connect racing
+            // the server's accept loop startup
+            let mut attempt = 0;
+            loop {
+                match Arc::clone(&client).connect().await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        attempt += 1;
+                        if attempt >= 3 {
+                            let _ = events_tx.send(AppEvent::NetStatus {
+                                message: format!("connection failed: {}", error),
+                            });
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        });
+        self.tiling.set_focused_panel(PanelKind::VideoChatFeeds);
+        self.status_note = "video chat connecting...".to_string();
+    }
+
+    /// Bind and spawn the video chat server. Binding happens synchronously
+    /// so "port busy" is reported immediately and a follow-up self-connect
+    /// cannot race the bind. Returns false if it did not start.
+    fn start_chat_server(&mut self, port: u16) -> bool {
+        if self.chat_server.is_some() {
+            let running = self.chat_server_port.unwrap_or(port);
+            self.add_system_message(format!(
+                "video chat server already running on :{} -- /invite to reprint the room code",
+                running
+            ));
+            self.status_note = format!("server already on :{}", running);
+            return false;
+        }
+        match std::net::TcpListener::bind(("0.0.0.0", port)) {
+            Ok(listener) => {
+                let server = Arc::new(VideoChatServer::new());
+                self.chat_server = Some(Arc::clone(&server));
+                self.chat_server_port = Some(port);
+                let events_tx = self.events_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = server.run_std(listener).await {
+                        let _ = events_tx.send(AppEvent::NetStatus {
+                            message: format!("server error: {}", error),
+                        });
+                    }
+                });
+                true
+            }
+            Err(error) => {
+                self.add_system_message(format!(
+                    "could not bind video chat server to port {}: {}",
+                    port, error
+                ));
+                self.status_note = "server bind failed".to_string();
+                false
+            }
+        }
+    }
+
+    /// Print the shareable room block: code, /join line, and raw ws:// URL.
+    fn print_room_invite(&mut self) {
+        let addr = if let Some(port) = self.chat_server_port {
+            Some(SocketAddrV4::new(roomcode::lan_ip(), port))
+        } else if let Some(ref vc) = self.video_chat {
+            roomcode::parse_ws_url(&vc.server_url).map(|a| {
+                if a.ip().is_loopback() {
+                    SocketAddrV4::new(roomcode::lan_ip(), a.port())
+                } else {
+                    a
+                }
+            })
+        } else {
+            None
+        };
+        match addr {
+            Some(addr) => {
+                let code = roomcode::encode(addr);
+                self.add_system_message("================= ROOM OPEN =================");
+                self.add_system_message(format!("  ROOM CODE: {}", code));
+                self.add_system_message(format!("  friend on the same WiFi runs: /join {}", code));
+                self.add_system_message(format!("  or direct: /connect ws://{}", addr));
+                self.add_system_message("=============================================");
+                self.status_note = format!("room code: {}", code);
+            }
+            None => {
+                self.add_system_message("no room to invite anyone to -- /host to open one");
+            }
+        }
     }
 
     fn persist(&self, provider: &AIProvider, role: &str, kind: &str, content: &str) {
@@ -2713,6 +2944,7 @@ impl App {
                     .constraints(row_constraints)
                     .split(inner);
 
+                let my_id = vc.my_id();
                 let mut frame_iter = frames.iter();
                 for r in 0..rows {
                     let col_constraints: Vec<Constraint> = (0..cols)
@@ -2724,10 +2956,10 @@ impl App {
                         .split(row_layout[r]);
 
                     for c in 0..cols {
-                        if let Some((uname, ascii_frame)) = frame_iter.next() {
+                        if let Some((uid, (uname, ascii_frame))) = frame_iter.next() {
                             let cell_area = col_layout[c];
                             render_ascii_frame(frame.buffer_mut(), cell_area, ascii_frame, 0.85);
-                            let is_self = uname == &self.username;
+                            let is_self = my_id.as_deref() == Some(uid.as_str());
                             let label = if is_self {
                                 format!("{} (you)", uname)
                             } else {
@@ -2837,16 +3069,17 @@ impl App {
                     Style::default().fg(t().muted),
                 )));
             } else {
+                let my_id = vc.my_id();
                 for u in users.iter() {
                     let indicator = current_spinner(phase);
-                    let is_self = u == &self.username;
+                    let is_self = my_id.as_deref() == Some(u.user_id.as_str());
                     lines.push(Line::from(vec![
                         Span::styled(
                             format!("  [{}] ", indicator),
                             Style::default().fg(if is_self { t().accent3 } else { t().accent4 }),
                         ),
                         Span::styled(
-                            u.as_str(),
+                            u.username.as_str(),
                             Style::default()
                                 .fg(if is_self { t().accent3 } else { t().text })
                                 .bold(),
@@ -3692,30 +3925,28 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     args: Args,
 ) -> Result<()> {
-    if let Some(port) = args.serve {
-        let addr = format!("0.0.0.0:{}", port);
-        let server = Arc::new(VideoChatServer::new());
-        let server_clone = Arc::clone(&server);
-        let addr_clone = addr.clone();
-        tokio::spawn(async move {
-            if let Err(e) = server_clone.run(&addr_clone).await {
-                eprintln!("server error: {}", e);
-            }
-        });
-    }
-
+    let serve_port = args.serve;
     let connect_url = args.connect.clone();
-    let username = args.username.clone();
     let mut app = App::new(args)?;
 
+    if let Some(port) = serve_port {
+        if app.start_chat_server(port) {
+            app.add_system_message(format!("video chat server live on 0.0.0.0:{}", port));
+            app.print_room_invite();
+        }
+    }
+
     if let Some(url) = connect_url {
-        let client = VideoChatClient::new(username.clone(), url.clone());
-        app.video_chat = Some(client);
-        app.tiling.set_focused_panel(PanelKind::VideoChatFeeds);
+        let url = if url.contains("://") {
+            url
+        } else {
+            format!("ws://{}", url)
+        };
         app.add_system_message(format!(
-            "video chat primed for {} as {} -- type /connect {} to go live",
-            url, username, url
+            "connecting to {} as {} ...",
+            url, app.username
         ));
+        app.start_video_client(url);
     }
 
     loop {

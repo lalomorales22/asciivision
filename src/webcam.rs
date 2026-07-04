@@ -255,10 +255,10 @@ pub fn ascii_frame_to_ws(frame: &AsciiFrame) -> WsAsciiFrame {
     for (i, &(ch, r, g, b)) in frame.cells.iter().enumerate() {
         let idx = i * 4;
         if idx + 3 < ws.data.len() {
-            ws.data[idx] = ch as u8;
-            ws.data[idx + 1] = r;
-            ws.data[idx + 2] = g;
-            ws.data[idx + 3] = b;
+            ws.data[idx] = ch as u32;
+            ws.data[idx + 1] = r as u32;
+            ws.data[idx + 2] = g as u32;
+            ws.data[idx + 3] = b as u32;
         }
     }
     ws
@@ -269,7 +269,12 @@ pub fn ws_frame_to_ascii(ws: &WsAsciiFrame) -> AsciiFrame {
     for i in 0..(ws.width as usize * ws.height as usize) {
         let idx = i * 4;
         if idx + 3 < ws.data.len() {
-            cells.push((ws.data[idx] as char, ws.data[idx + 1], ws.data[idx + 2], ws.data[idx + 3]));
+            cells.push((
+                crate::message::decode_glyph(ws.data[idx]),
+                (ws.data[idx + 1] & 0xff) as u8,
+                (ws.data[idx + 2] & 0xff) as u8,
+                (ws.data[idx + 3] & 0xff) as u8,
+            ));
         } else {
             cells.push((' ', 0, 0, 0));
         }
@@ -278,5 +283,37 @@ pub fn ws_frame_to_ascii(ws: &WsAsciiFrame) -> AsciiFrame {
         width: ws.width,
         height: ws.height,
         cells,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_converters_roundtrip_unicode_glyphs() {
+        let frame = AsciiFrame {
+            width: 3,
+            height: 1,
+            cells: vec![('▀', 255, 0, 0), ('█', 0, 255, 0), ('X', 0, 0, 255)],
+        };
+        let ws = ascii_frame_to_ws(&frame);
+        let back = ws_frame_to_ascii(&ws);
+        assert_eq!(back.width, 3);
+        assert_eq!(back.height, 1);
+        assert_eq!(back.cells, frame.cells);
+    }
+
+    #[test]
+    fn short_wire_buffer_pads_with_black_spaces() {
+        let ws = WsAsciiFrame {
+            width: 2,
+            height: 1,
+            data: vec!['A' as u32, 9, 9, 9], // only one cell of data
+        };
+        let back = ws_frame_to_ascii(&ws);
+        assert_eq!(back.cells.len(), 2);
+        assert_eq!(back.cells[0], ('A', 9, 9, 9));
+        assert_eq!(back.cells[1], (' ', 0, 0, 0));
     }
 }
