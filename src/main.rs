@@ -3748,18 +3748,47 @@ async fn run_app(
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     let _ = dotenvy::from_filename("archive/mega-cli/.env");
+    // also look for .env next to the installed binary's repo root and in the
+    // config dir, so API keys load no matter which directory launched us
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(root) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            let _ = dotenvy::from_path(root.join(".env"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let _ = dotenvy::from_path(std::path::Path::new(&home).join(".config/asciivision/.env"));
+    }
 
     let args = Args::parse();
+
+    // restore the terminal on panic so a crash never leaves the shell frozen
+    // in raw mode; stderr is muted, so the message goes to a log file and to
+    // stdout after leaving the alternate screen
+    std::panic::set_hook(Box::new(|info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        let msg = format!(
+            "asciivision panicked: {info}\nbacktrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Ok(home) = std::env::var("HOME") {
+            let dir = std::path::Path::new(&home).join(".config/asciivision");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("panic.log"), &msg);
+        }
+        println!("{msg}");
+    }));
 
     // suppress ALL FFmpeg log output before anything else --
     // FFmpeg writes to stderr which corrupts the TUI display
     unsafe { ffmpeg_sys_next::av_log_set_level(ffmpeg_sys_next::AV_LOG_QUIET) };
 
     // redirect stderr to /dev/null so nothing can corrupt the TUI
+    // (must be opened writable or every stderr write fails with EBADF)
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
-        if let Ok(devnull) = std::fs::File::open("/dev/null") {
+        if let Ok(devnull) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
             extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
             unsafe { dup2(devnull.as_raw_fd(), 2); }
         }
