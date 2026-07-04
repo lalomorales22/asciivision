@@ -29,6 +29,7 @@ mod memory;
 mod message;
 mod roomcode;
 mod server;
+mod shader;
 mod shell;
 mod sysmon;
 mod theme;
@@ -1211,7 +1212,7 @@ impl App {
             KeyCode::F(4) => {
                 self.effects.cycle_with_off();
                 self.status_note = if self.effects.active {
-                    format!("3D fx: {}", self.effects.kind.name())
+                    format!("3D fx: {}", self.effects.current_name())
                 } else {
                     "3D fx offline".to_string()
                 };
@@ -1426,17 +1427,31 @@ impl App {
         if input == "/3d" || input == "/effects" {
             self.effects.active = !self.effects.active;
             self.status_note = if self.effects.active {
-                format!("3D fx: {}", self.effects.kind.name())
+                format!("3D fx: {}", self.effects.current_name())
             } else {
                 "3D fx offline".to_string()
             };
             return;
         }
 
-        if input == "/fx" {
+        if input == "/fx" || input.starts_with("/fx ") {
+            let arg = input.strip_prefix("/fx").map(str::trim).unwrap_or("");
+            if !arg.is_empty() {
+                if self.effects.set_by_name(arg) {
+                    self.add_system_message(format!("3D effect: {}", self.effects.current_name()));
+                    self.status_note = format!("3D fx: {}", self.effects.current_name());
+                } else {
+                    self.add_system_message(format!(
+                        "unknown effect '{}' -- available: {}",
+                        arg,
+                        self.effects.names().join(", ")
+                    ));
+                }
+                return;
+            }
             self.effects.cycle_with_off();
             if self.effects.active {
-                self.add_system_message(format!("3D effect: {}", self.effects.kind.name()));
+                self.add_system_message(format!("3D effect: {}", self.effects.current_name()));
             } else {
                 self.add_system_message("3D effects offline");
             }
@@ -2457,7 +2472,7 @@ impl App {
             PanelKind::OpsDeck => self.render_ops_panel(frame, area, phase),
             PanelKind::Effects3D => {
                 let title = if self.effects.active {
-                    format!(" 3D EFFECTS // {} ", self.effects.kind.name())
+                    format!(" 3D EFFECTS // {} ", self.effects.current_name())
                 } else {
                     " 3D EFFECTS // OFFLINE ".to_string()
                 };
@@ -2541,7 +2556,7 @@ impl App {
         );
 
         let fx_tag = if self.effects.active {
-            format!("fx:{}", self.effects.kind.name())
+            format!("fx:{}", self.effects.current_name())
         } else {
             "fx:off".to_string()
         };
@@ -2790,7 +2805,7 @@ impl App {
                 Span::styled("3d fx:    ", Style::default().fg(t().accent2).bold()),
                 Span::styled(
                     if self.effects.active {
-                        self.effects.kind.name()
+                        self.effects.current_name()
                     } else {
                         "offline"
                     },
@@ -3598,16 +3613,44 @@ fn render_ascii_frame(buffer: &mut Buffer, area: Rect, ascii: &video::AsciiFrame
 }
 
 fn render_background(buffer: &mut Buffer, area: Rect, phase: f32) {
+    // Snapshot the theme ONCE per frame (the old code took the lock twice
+    // per cell), and lerp in u8 space without re-resolving colors.
+    let (base_rgb, alt_rgb) = {
+        let th = theme::t();
+        (to_rgb(th.bg_base), to_rgb(th.bg_alt))
+    };
+    let w = area.width.max(1) as f32;
+    let h = area.height.max(1) as f32;
+    let cx = area.x as f32 + w * 0.5;
+    let cy = area.y as f32 + h * 0.5;
+    // Slow-breathing radial vignette (cells are ~2:1, so y counts double).
+    let vig_scale = 1.0 + (phase * 0.23).sin() * 0.08;
+    let inv_rx = 2.0 / (w * vig_scale);
+    let inv_ry = 2.0 / (h * 1.15 * vig_scale);
+    let seed_fine = (phase * 3.0) as u32;
+    let seed_coarse = (phase * 0.7) as u32;
+
     for y in area.y..area.y + area.height {
-        let band = (((y as f32 * 0.23) + phase * 1.6).sin() * 0.5 + 0.5) * 0.26;
+        let band = (((y as f32 * 0.21) + phase * 1.2).sin() * 0.5 + 0.5) * 0.16;
+        let dy = (y as f32 - cy) * inv_ry;
+        let dy2 = dy * dy;
         for x in area.x..area.x + area.width {
-            let noise = hash32(x, y, (phase * 33.0) as u32);
-            let base = mix_color(t().bg_base, t().bg_alt, band + ((noise & 0x07) as f32 / 90.0));
+            // Two-octave hash noise: fine shimmer + drifting coarse blobs.
+            let fine = (hash32(x, y, seed_fine) & 0x07) as f32 / 7.0;
+            let coarse = (hash32(x / 5, y / 3, seed_coarse) & 0x0f) as f32 / 15.0;
+            let dx = (x as f32 - cx) * inv_rx;
+            let vignette = (1.0 - (dx * dx + dy2) * 0.55).clamp(0.35, 1.0);
+            let field = (band + fine * 0.07 + coarse * 0.17) * vignette;
+            let t_mix = field.clamp(0.0, 1.0);
+            let r = (base_rgb.0 as f32 + (alt_rgb.0 as f32 - base_rgb.0 as f32) * t_mix) as u8;
+            let g = (base_rgb.1 as f32 + (alt_rgb.1 as f32 - base_rgb.1 as f32) * t_mix) as u8;
+            let b = (base_rgb.2 as f32 + (alt_rgb.2 as f32 - base_rgb.2 as f32) * t_mix) as u8;
+            let shade = Color::Rgb(r, g, b);
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.reset();
                 cell.set_char(' ');
-                cell.set_bg(base);
-                cell.set_fg(base);
+                cell.set_bg(shade);
+                cell.set_fg(shade);
             }
         }
     }
