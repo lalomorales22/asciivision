@@ -1541,7 +1541,7 @@ impl App {
                         self.status_note = self.games.status_note().to_string();
                     } else {
                         self.add_system_message(
-                            "games: /games, /games play, /games menu, /games next, /games pacman|space|penguin",
+                            "games: /games, /games play, /games menu, /games next, /games pacman|space|penguin|pong|tron|snake|breakout",
                         );
                     }
                 }
