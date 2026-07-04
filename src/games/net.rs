@@ -10,6 +10,8 @@
 //!   host  -> {"t":"invite"}                 (announce open room; re-sent every 2s)
 //!   guest -> {"t":"join"}                   (blind join; re-sent every 2s while waiting)
 //!   host  -> {"t":"start","seed":u64}       (locks the first joiner as opponent)
+//!   host  -> {"t":"full"}                   (join rejected: room already locked)
+//!   both  -> {"t":"ka"}                     (~1Hz liveness keepalive once locked)
 //!   both  -> {"t":"quit"}                   (leaving; sent automatically on drop)
 //! In-match traffic ({"t":"input",...} guest->host, {"t":"state",...} host->guest)
 //! is game-specific and defined in pong.rs / tron.rs.
@@ -92,6 +94,8 @@ pub(crate) enum HsEvent {
     Started { seed: u64 },
     /// The locked opponent sent {"t":"quit"}.
     OpponentLeft,
+    /// A host replied {"t":"full"}: the room is locked to another guest.
+    Full,
 }
 
 pub(crate) struct Handshake {
@@ -183,7 +187,9 @@ impl Handshake {
                     // Guest never saw our start (lost message): resend, no new event.
                     (None, Some(json!({"t": "start", "seed": self.seed})))
                 } else {
-                    (None, None) // room already full; ignore other joiners
+                    // Room already locked to another guest: tell them so they
+                    // stop waiting instead of resending join forever.
+                    (None, Some(json!({"t": "full"})))
                 }
             }
             (NetRole::Guest, "start") => {
@@ -201,6 +207,14 @@ impl Handshake {
                 // A host appeared (possibly after we started waiting): answer fast.
                 if self.phase == HsPhase::Waiting {
                     (None, Some(json!({"t": "join"})))
+                } else {
+                    (None, None)
+                }
+            }
+            (NetRole::Guest, "full") => {
+                // Our join was rejected: the host is locked to someone else.
+                if self.phase == HsPhase::Waiting {
+                    (Some(HsEvent::Full), None)
                 } else {
                     (None, None)
                 }
@@ -246,6 +260,42 @@ impl Throttle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Peer liveness (keepalive pacing + inbound-silence timeout)
+// ---------------------------------------------------------------------------
+
+/// Seconds of inbound silence after which the locked opponent counts as gone.
+pub(crate) const PEER_TIMEOUT_SECS: f32 = 5.0;
+/// Rate at which each side proves it is still alive once a match is locked.
+pub(crate) const KEEPALIVE_HZ: f32 = 1.0;
+
+/// Tracks inbound traffic from the locked opponent and paces our own
+/// keepalive sends. Pure timers, so the timeout state machine is testable.
+pub(crate) struct Liveness {
+    silence: f32,
+    keepalive: Throttle,
+}
+
+impl Liveness {
+    pub(crate) fn new() -> Self {
+        Self {
+            silence: 0.0,
+            keepalive: Throttle::new(KEEPALIVE_HZ),
+        }
+    }
+
+    /// Any payload from the opponent proves the peer is alive.
+    pub(crate) fn on_inbound(&mut self) {
+        self.silence = 0.0;
+    }
+
+    /// Advance timers. Returns `(keepalive_due, opponent_timed_out)`.
+    pub(crate) fn tick(&mut self, dt: f32) -> (bool, bool) {
+        self.silence += dt;
+        (self.keepalive.ready(dt), self.silence > PEER_TIMEOUT_SECS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,18 +336,32 @@ mod tests {
     }
 
     #[test]
-    fn host_ignores_second_joiner_but_resends_start_to_opponent() {
+    fn host_rejects_second_joiner_with_full_but_resends_start_to_opponent() {
         let (mut host, _) = Handshake::host(1);
         let join = json!({"t": "join"});
         host.on_net("first", "A", &join);
-        // A different client joining a full room is ignored.
+        // A different client joining a locked room is told it is full.
         let (event, reply) = host.on_net("second", "B", &join);
         assert!(event.is_none());
-        assert!(reply.is_none());
+        assert_eq!(reply, Some(json!({"t": "full"})));
         // The locked opponent re-joining (lost start) gets the start again.
         let (event, reply) = host.on_net("first", "A", &join);
         assert!(event.is_none());
         assert_eq!(reply, Some(json!({"t": "start", "seed": 1})));
+    }
+
+    #[test]
+    fn waiting_guest_surfaces_full_rejection() {
+        let (mut guest, _) = Handshake::guest();
+        let full = json!({"t": "full"});
+        let (event, reply) = guest.on_net("host-id", "H", &full);
+        assert_eq!(event, Some(HsEvent::Full));
+        assert!(reply.is_none());
+
+        // Once locked to a host, a stray full is ignored.
+        let (mut guest, _) = Handshake::guest();
+        guest.on_net("host-id", "H", &json!({"t": "start", "seed": 4}));
+        assert_eq!(guest.on_net("other", "O", &full).0, None);
     }
 
     #[test]
@@ -364,5 +428,39 @@ mod tests {
         assert!(throttle.ready(0.03)); // 60ms accumulated
         assert!(!throttle.ready(0.04));
         assert!(throttle.ready(0.02)); // 60ms accumulated again
+    }
+
+    #[test]
+    fn liveness_times_out_after_silence_and_resets_on_inbound() {
+        let mut liveness = Liveness::new();
+        // Just under the timeout: still alive.
+        let mut timed_out = false;
+        for _ in 0..49 {
+            timed_out |= liveness.tick(0.1).1; // 4.9s total
+        }
+        assert!(!timed_out, "no timeout before {}s", PEER_TIMEOUT_SECS);
+        // Inbound traffic resets the silence clock.
+        liveness.on_inbound();
+        for _ in 0..49 {
+            timed_out |= liveness.tick(0.1).1;
+        }
+        assert!(!timed_out, "inbound traffic must reset the timeout");
+        // Crossing the threshold with no inbound traffic times out.
+        for _ in 0..3 {
+            timed_out |= liveness.tick(0.1).1; // 5.2s since last inbound
+        }
+        assert!(timed_out, "silence past {}s times out", PEER_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn liveness_paces_keepalives_at_one_hz() {
+        let mut liveness = Liveness::new();
+        let mut sends = 0;
+        for _ in 0..30 {
+            if liveness.tick(0.1).0 {
+                sends += 1;
+            }
+        }
+        assert_eq!(sends, 3, "3 seconds of ticks yield 3 keepalives");
     }
 }

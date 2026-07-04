@@ -311,10 +311,12 @@ impl Game for PacManGame {
     }
 
     fn render(&self, buffer: &mut Buffer, area: Rect) {
-        let mut grid = CellGrid::new(area.width, area.height, t().panel_bg, t().text);
+        // Snapshot the theme once: no RwLock churn inside the cell loops.
+        let theme = t().clone();
+        let mut grid = CellGrid::new(area.width, area.height, theme.panel_bg, theme.text);
         if area.height < 6 {
-            grid.center_text(0, "PAC-MAN", t().accent2, t().panel_bg);
-            grid.center_text(2, "Grow this tile to play.", t().muted, t().panel_bg);
+            grid.center_text(0, "PAC-MAN", theme.accent2, theme.panel_bg);
+            grid.center_text(2, "Grow this tile to play.", theme.muted, theme.panel_bg);
             grid.present(buffer, area);
             return;
         }
@@ -326,8 +328,8 @@ impl Game for PacManGame {
                 "score {:05}  level {}  lives {}",
                 self.score, self.level, self.lives
             ),
-            t().accent2,
-            t().panel_bg,
+            theme.accent2,
+            theme.panel_bg,
         );
         let status = if self.game_over {
             "R restart  Esc menu"
@@ -336,7 +338,7 @@ impl Game for PacManGame {
         } else {
             "WASD move  1-7 switch games"
         };
-        grid.text(0, 1, status, t().accent4, t().panel_bg);
+        grid.text(0, 1, status, theme.accent4, theme.panel_bg);
 
         let game_top = 2u16;
         let game_h = area.height.saturating_sub(game_top);
@@ -348,13 +350,13 @@ impl Game for PacManGame {
                 let src_x = (sx as i32 * PAC_W) / game_w.max(1) as i32;
                 let tile = pac_tile(src_x, src_y);
                 let (ch, fg, bg) = if tile == '#' {
-                    ('#', t().accent4, t().panel_alt)
+                    ('#', theme.accent4, theme.panel_alt)
                 } else if self.power_pellets.contains(&(src_x, src_y)) {
-                    ('o', t().accent2, t().panel_bg)
+                    ('o', theme.accent2, theme.panel_bg)
                 } else if self.pellets.contains(&(src_x, src_y)) {
-                    ('.', t().accent1, t().panel_bg)
+                    ('.', theme.accent1, theme.panel_bg)
                 } else {
-                    (' ', t().text, t().panel_bg)
+                    (' ', theme.text, theme.panel_bg)
                 };
                 grid.set(sx as i32, sy as i32 + game_top as i32, ch, fg, bg);
             }
@@ -362,7 +364,7 @@ impl Game for PacManGame {
 
         let pac_x = project_axis(self.pac.0 as f32, PAC_W as f32, game_w);
         let pac_y = project_axis(self.pac.1 as f32, PAC_H as f32, game_h) + game_top as i32;
-        grid.set(pac_x, pac_y, 'C', Color::Rgb(255, 232, 92), t().panel_bg);
+        grid.set(pac_x, pac_y, 'C', Color::Rgb(255, 232, 92), theme.panel_bg);
 
         for ghost in &self.ghosts {
             let gx = project_axis(ghost.x as f32, PAC_W as f32, game_w);
@@ -372,13 +374,13 @@ impl Game for PacManGame {
             } else {
                 ghost.color
             };
-            grid.set(gx, gy, 'G', color, t().panel_bg);
+            grid.set(gx, gy, 'G', color, theme.panel_bg);
         }
 
         if self.game_over {
             let y = area.height.saturating_sub(2) as i32;
-            grid.center_text(y - 1, "GAME OVER", t().danger, t().panel_bg);
-            grid.center_text(y, "Press R to restart or Esc to return", t().text, t().panel_bg);
+            grid.center_text(y - 1, "GAME OVER", theme.danger, theme.panel_bg);
+            grid.center_text(y, "Press R to restart or Esc to return", theme.text, theme.panel_bg);
         }
 
         grid.present(buffer, area);

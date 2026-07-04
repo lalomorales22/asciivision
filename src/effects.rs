@@ -23,8 +23,9 @@ use crate::theme::{color_to_rgb, t};
 
 const MATRIX_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789@#$%&*+=<>{}[]|/\\~";
 
-/// A single visual effect. `time` is wall-clock seconds (already wrapped to
-/// a sane range), `dt` is the frame delta clamped to <= 0.05s.
+/// A single visual effect. `time` is seconds since the effect was activated
+/// (continuous for the whole activation -- no wrap, no snap; finding #10),
+/// `dt` is the frame delta clamped to <= 0.05s.
 pub trait Effect {
     fn name(&self) -> &'static str;
     fn render(&mut self, buf: &mut Buffer, area: Rect, time: f32, dt: f32);
@@ -41,6 +42,14 @@ pub struct EffectsEngine {
     pub active: bool,
     last_frame: Option<Instant>,
     last_size: (u16, u16),
+    /// Start of the current activation; effect time is measured from here.
+    /// Unlike the old wall-clock `wrap_time(phase)` (which snapped every
+    /// effect to a different pose once per hour -- finding #10), this clock
+    /// is continuous for the whole activation, and sessions realistically
+    /// never keep one effect active long enough for f32 precision to matter.
+    activated_at: Option<Instant>,
+    /// Test hook: seconds added to the activation clock (0.0 in production).
+    time_offset: f32,
 }
 
 impl EffectsEngine {
@@ -64,7 +73,22 @@ impl EffectsEngine {
             active: false,
             last_frame: None,
             last_size: (0, 0),
+            activated_at: None,
+            time_offset: 0.0,
         }
+    }
+
+    /// Restart the per-activation clock (the next rendered frame is t=0).
+    fn restart_clock(&mut self) {
+        self.activated_at = None;
+        self.time_offset = 0.0;
+        self.last_frame = None;
+    }
+
+    /// Deterministically advance the activation clock (tests only).
+    #[cfg(test)]
+    fn fast_forward(&mut self, secs: f32) {
+        self.time_offset += secs;
     }
 
     /// Name of the currently selected effect (valid even while inactive).
@@ -82,7 +106,7 @@ impl EffectsEngine {
         if !self.active {
             self.active = true;
             self.effects[self.index].reset();
-            self.last_frame = None;
+            self.restart_clock();
             return;
         }
         if self.index + 1 >= self.effects.len() {
@@ -93,7 +117,7 @@ impl EffectsEngine {
         }
         self.index += 1;
         self.effects[self.index].reset();
-        self.last_frame = None;
+        self.restart_clock();
     }
 
     /// Select an effect by (case-insensitive) name, prefix, or substring.
@@ -122,7 +146,7 @@ impl EffectsEngine {
                 self.index = i;
                 self.active = true;
                 self.effects[i].reset();
-                self.last_frame = None;
+                self.restart_clock();
                 true
             }
             None => false,
@@ -131,7 +155,12 @@ impl EffectsEngine {
 
     /// Render the current effect. Computes dt internally (clamped to 0.05s)
     /// and resets the active effect's state when the panel is resized.
-    pub fn render(&mut self, buffer: &mut Buffer, area: Rect, phase: f32) {
+    ///
+    /// `_phase` (wall-clock seconds since app start) is kept for call-site
+    /// stability but no longer drives the effects: the engine's own
+    /// activation-relative clock does, so no hourly `wrap_time` snap can
+    /// ever occur mid-effect (finding #10).
+    pub fn render(&mut self, buffer: &mut Buffer, area: Rect, _phase: f32) {
         if !self.active || area.width < 4 || area.height < 4 {
             return;
         }
@@ -148,7 +177,8 @@ impl EffectsEngine {
             self.effects[self.index].reset();
         }
 
-        let time = shader::wrap_time(phase);
+        let start = *self.activated_at.get_or_insert(now);
+        let time = now.duration_since(start).as_secs_f32() + self.time_offset;
         self.effects[self.index].render(buffer, area, time, dt);
     }
 }
@@ -1210,11 +1240,13 @@ mod tests {
             assert!(engine.set_by_name(name), "set_by_name({name})");
             let a = render_frame(&mut engine, area, 0.0);
             assert!(buffer_has_content(&a, area), "{name} wrote nothing");
-            // dt-driven effects need real elapsed time between frames.
-            let mut b = render_frame(&mut engine, area, 0.25);
-            for step in 0..4 {
+            // Time-driven effects advance via the deterministic test clock;
+            // dt-driven effects also need real elapsed time between frames.
+            let mut b = render_frame(&mut engine, area, 0.0);
+            for _ in 0..4 {
                 std::thread::sleep(std::time::Duration::from_millis(15));
-                b = render_frame(&mut engine, area, 0.5 + step as f32 * 0.25);
+                engine.fast_forward(0.25);
+                b = render_frame(&mut engine, area, 0.0);
             }
             assert!(buffer_has_content(&b, area), "{name} wrote nothing at t>0");
             assert_ne!(
@@ -1223,6 +1255,58 @@ mod tests {
                 "{name} must animate over time"
             );
         }
+    }
+
+    /// Finding #10: effect time is measured from activation and never
+    /// wrapped, so crossing the old 3600s boundary cannot snap the pose,
+    /// and re-activating an effect restarts its clock.
+    #[test]
+    fn effect_clock_is_activation_based_with_no_hourly_wrap() {
+        let area = Rect::new(0, 0, 40, 16);
+
+        // Just past the old wrap point the output must NOT equal the output
+        // at the wrapped time (3600.5 -> 0.5 under the old rem_euclid(3600)).
+        let mut old_session = EffectsEngine::new();
+        assert!(old_session.set_by_name("PLASMA FIELD"));
+        old_session.fast_forward(3600.5);
+        let past_wrap = render_frame(&mut old_session, area, 0.0);
+
+        let mut young_session = EffectsEngine::new();
+        assert!(young_session.set_by_name("PLASMA FIELD"));
+        young_session.fast_forward(0.5);
+        let young = render_frame(&mut young_session, area, 0.0);
+
+        assert_ne!(
+            past_wrap.content(),
+            young.content(),
+            "t=3600.5 rendered like t=0.5: the hourly wrap snap is back"
+        );
+
+        // Re-activation restarts the clock: a re-selected effect renders
+        // exactly like one on a brand new engine (t=0 for both).
+        assert!(old_session.set_by_name("PLASMA FIELD"));
+        let reactivated = render_frame(&mut old_session, area, 0.0);
+        let mut fresh = EffectsEngine::new();
+        assert!(fresh.set_by_name("PLASMA FIELD"));
+        let fresh_frame = render_frame(&mut fresh, area, 0.0);
+        assert_eq!(
+            reactivated.content(),
+            fresh_frame.content(),
+            "set_by_name must restart the activation clock"
+        );
+
+        // The wall-clock `phase` argument no longer influences the output.
+        let mut a = EffectsEngine::new();
+        assert!(a.set_by_name("PLASMA FIELD"));
+        let with_phase = render_frame(&mut a, area, 3599.9);
+        let mut b = EffectsEngine::new();
+        assert!(b.set_by_name("PLASMA FIELD"));
+        let without_phase = render_frame(&mut b, area, 0.0);
+        assert_eq!(
+            with_phase.content(),
+            without_phase.content(),
+            "phase must be inert -- the engine owns the effect clock"
+        );
     }
 
     #[test]
@@ -1238,12 +1322,15 @@ mod tests {
         }
     }
 
-    /// Perf sanity: one frame of every effect on a 100x40 panel. Generous
-    /// debug budget -- this only catches pathological regressions. Release
-    /// must stay well under the ~8ms frame budget.
+    /// Perf sanity on a 100x40 panel, averaged over a few frames. The
+    /// budgets are deliberately loose (finding #8): they exist to catch
+    /// PATHOLOGICAL regressions (an effect suddenly 5-10x slower), not to
+    /// benchmark -- a loaded CI runner or an older machine must not flake,
+    /// and averaging absorbs one-off scheduler hiccups.
     #[test]
     fn timing_sanity_all_effects() {
-        let budget_ms: f64 = if cfg!(debug_assertions) { 30.0 } else { 8.0 };
+        let budget_ms: f64 = if cfg!(debug_assertions) { 60.0 } else { 25.0 };
+        const FRAMES: u32 = 3;
         let mut engine = EffectsEngine::new();
         let area = Rect::new(0, 0, 100, 40);
         let count = engine.names().len();
@@ -1253,12 +1340,15 @@ mod tests {
             // Warm-up frame (allocations, lazy seeding).
             let _ = render_frame(&mut engine, area, 0.0);
             let start = Instant::now();
-            let _ = render_frame(&mut engine, area, 0.5);
-            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-            println!("{name}: {elapsed:.2}ms"); // visible with -- --nocapture
+            for _ in 0..FRAMES {
+                engine.fast_forward(0.25); // vary the pose across samples
+                let _ = render_frame(&mut engine, area, 0.0);
+            }
+            let avg = start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+            println!("{name}: {avg:.2}ms/frame avg"); // visible with -- --nocapture
             assert!(
-                elapsed < budget_ms,
-                "{name} took {elapsed:.2}ms (budget {budget_ms}ms)"
+                avg < budget_ms,
+                "{name} averaged {avg:.2}ms/frame (budget {budget_ms}ms)"
             );
         }
     }

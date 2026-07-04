@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use std::f32::consts::PI;
 
 use super::{CellGrid, Game};
-use crate::theme::t;
+use crate::theme::{t, Theme};
 
 const PENGUIN_WORLD_W: f32 = 120.0;
 const PENGUIN_WORLD_H: f32 = 90.0;
@@ -93,7 +93,7 @@ impl PenguinGame {
         }
     }
 
-    fn render_penguin_minimap(&self, grid: &mut CellGrid, sky: Color, ice: Color) {
+    fn render_penguin_minimap(&self, grid: &mut CellGrid, theme: &Theme, sky: Color, ice: Color) {
         let map_w = 16i32;
         let map_h = 8i32;
         let x0 = grid.width as i32 - map_w - 1;
@@ -109,7 +109,7 @@ impl PenguinGame {
                     x0 + x,
                     y0 + y,
                     if border { '#' } else { ' ' },
-                    t().muted,
+                    theme.muted,
                     sky,
                 );
             }
@@ -122,7 +122,7 @@ impl PenguinGame {
         }
         let px = x0 + 1 + ((self.x / PENGUIN_WORLD_W) * (map_w - 2) as f32) as i32;
         let py = y0 + 1 + ((self.y / PENGUIN_WORLD_H) * (map_h - 2) as f32) as i32;
-        grid.set(px, py, 'P', t().accent4, ice);
+        grid.set(px, py, 'P', theme.accent4, ice);
     }
 }
 
@@ -215,7 +215,9 @@ impl Game for PenguinGame {
     }
 
     fn render(&self, buffer: &mut Buffer, area: Rect) {
-        let mut grid = CellGrid::new(area.width, area.height, t().panel_bg, t().text);
+        // Snapshot the theme once: no RwLock churn inside the cell loops.
+        let theme = t().clone();
+        let mut grid = CellGrid::new(area.width, area.height, theme.panel_bg, theme.text);
         let sky = Color::Rgb(16, 34, 52);
         let ice = Color::Rgb(178, 212, 226);
         let horizon = area.height.saturating_sub(6).max(6) / 2;
@@ -223,7 +225,7 @@ impl Game for PenguinGame {
         for y in 0..area.height {
             let bg = if y <= horizon { sky } else { ice };
             for x in 0..area.width {
-                grid.set(x as i32, y as i32, ' ', t().text, bg);
+                grid.set(x as i32, y as i32, ' ', theme.text, bg);
             }
         }
 
@@ -236,19 +238,19 @@ impl Game for PenguinGame {
                 self.score / 100,
                 self.combo.max(1)
             ),
-            t().accent2,
+            theme.accent2,
             sky,
         );
         grid.text(
             0,
             1,
             "W/S move  A/D turn  collect fish  Esc menu",
-            t().accent4,
+            theme.accent4,
             sky,
         );
 
         for x in 0..area.width {
-            grid.set(x as i32, horizon as i32, '-', t().muted, sky);
+            grid.set(x as i32, horizon as i32, '-', theme.muted, sky);
         }
 
         for flake in &self.snow {
@@ -272,7 +274,7 @@ impl Game for PenguinGame {
             let x = sx.round() as i32;
             let sprite = if forward < 10.0 { "><>" } else { "><" };
             let color = if self.flash_timer > 0.0 {
-                t().accent2
+                theme.accent2
             } else {
                 Color::Rgb(255, 148, 79)
             };
@@ -282,10 +284,10 @@ impl Game for PenguinGame {
         let penguin = [" _n_", "(o )", "/_|"];
         let base_y = area.height.saturating_sub(3) as i32;
         for (idx, line) in penguin.iter().enumerate() {
-            grid.center_text(base_y + idx as i32, line, t().accent3, ice);
+            grid.center_text(base_y + idx as i32, line, theme.accent3, ice);
         }
 
-        self.render_penguin_minimap(&mut grid, sky, ice);
+        self.render_penguin_minimap(&mut grid, &theme, sky, ice);
         grid.present(buffer, area);
     }
 }

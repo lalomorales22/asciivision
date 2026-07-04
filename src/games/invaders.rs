@@ -264,7 +264,9 @@ impl Game for SpaceInvadersGame {
     }
 
     fn render(&self, buffer: &mut Buffer, area: Rect) {
-        let mut grid = CellGrid::new(area.width, area.height, t().panel_bg, t().text);
+        // Snapshot the theme once: no RwLock churn inside the render loops.
+        let theme = t().clone();
+        let mut grid = CellGrid::new(area.width, area.height, theme.panel_bg, theme.text);
         grid.text(
             0,
             0,
@@ -272,8 +274,8 @@ impl Game for SpaceInvadersGame {
                 "wave {}  score {:05}  lives {}",
                 self.wave, self.score, self.lives
             ),
-            t().accent2,
-            t().panel_bg,
+            theme.accent2,
+            theme.panel_bg,
         );
         let shield = if self.shield_cooldown <= 0.0 {
             "S shield ready"
@@ -284,8 +286,8 @@ impl Game for SpaceInvadersGame {
             0,
             1,
             &format!("A/D move  W fire  {}  Esc menu", shield),
-            t().accent4,
-            t().panel_bg,
+            theme.accent4,
+            theme.panel_bg,
         );
 
         let game_top = 2u16;
@@ -293,7 +295,7 @@ impl Game for SpaceInvadersGame {
         for star in &self.stars {
             let sx = project_axis(star.x, SPACE_W, area.width);
             let sy = project_axis(star.y, SPACE_H, game_h) + game_top as i32;
-            grid.set(sx, sy, '.', t().muted, t().panel_bg);
+            grid.set(sx, sy, '.', theme.muted, theme.panel_bg);
         }
 
         for invader in self.invaders.iter().filter(|inv| inv.alive) {
@@ -304,28 +306,28 @@ impl Game for SpaceInvadersGame {
             } else {
                 'M'
             };
-            grid.set(x, y, ch, t().accent1, t().panel_bg);
+            grid.set(x, y, ch, theme.accent1, theme.panel_bg);
         }
 
         for bullet in &self.bullets {
             let x = project_axis(bullet.x, SPACE_W, area.width);
             let y = project_axis(bullet.y, SPACE_H, game_h) + game_top as i32;
-            let color = if bullet.friendly { t().accent4 } else { t().danger };
-            grid.set(x, y, '|', color, t().panel_bg);
+            let color = if bullet.friendly { theme.accent4 } else { theme.danger };
+            grid.set(x, y, '|', color, theme.panel_bg);
         }
 
         let player_x = project_axis(self.player_x, SPACE_W, area.width);
         let player_y = game_top as i32 + game_h.saturating_sub(1) as i32;
-        grid.set(player_x, player_y, 'A', t().accent3, t().panel_bg);
+        grid.set(player_x, player_y, 'A', theme.accent3, theme.panel_bg);
         if self.shield_timer > 0.0 {
-            grid.set(player_x - 1, player_y, '(', t().accent4, t().panel_bg);
-            grid.set(player_x + 1, player_y, ')', t().accent4, t().panel_bg);
+            grid.set(player_x - 1, player_y, '(', theme.accent4, theme.panel_bg);
+            grid.set(player_x + 1, player_y, ')', theme.accent4, theme.panel_bg);
         }
 
         if self.game_over {
             let mid = area.height as i32 / 2;
-            grid.center_text(mid - 1, "DEFENSE LINE COLLAPSED", t().danger, t().panel_bg);
-            grid.center_text(mid, "Press R to restart or Esc for menu", t().text, t().panel_bg);
+            grid.center_text(mid - 1, "DEFENSE LINE COLLAPSED", theme.danger, theme.panel_bg);
+            grid.center_text(mid, "Press R to restart or Esc for menu", theme.text, theme.panel_bg);
         }
 
         grid.present(buffer, area);

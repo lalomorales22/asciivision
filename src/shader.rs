@@ -168,6 +168,13 @@ pub fn rot2(x: f32, y: f32, angle: f32) -> (f32, f32) {
 
 /// Wrap unbounded wall-clock time into a sane range before trig so
 /// long-running sessions do not lose float precision.
+///
+/// RETIRED from the render hot path: the discontinuity at the 3600s wrap
+/// made every effect visibly snap to a different pose once per hour
+/// (finding #10). [`crate::effects::EffectsEngine`] now feeds effects an
+/// activation-relative clock instead. Kept as contracted shader API for
+/// callers that need bounded trig input on genuinely unbounded time.
+#[allow(dead_code)]
 pub fn wrap_time(t: f32) -> f32 {
     t.rem_euclid(3600.0)
 }

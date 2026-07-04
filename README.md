@@ -1,6 +1,6 @@
-# ASCIIVision v2.0 -- All-In-One Terminal Powerhouse
+# ASCIIVision v3.0 -- All-In-One Terminal Powerhouse
 
-> Agentic AI chat, live ASCII video, webcam streaming, WebSocket video chat, 3D terminal effects, Hyprland-style tiling, system monitoring, conversation analytics -- all in one terminal app.
+> Agentic AI chat, ray-marched WebGL-style terminal graphics, a fuzzy command palette, live ASCII video, webcam streaming, multiplayer arcade games over WebSocket, room-code video chat, Hyprland-style tiling, system monitoring, conversation analytics -- all in one terminal app.
 
 ![ASCIIVision Screenshot](asciivision2.png)
 
@@ -16,11 +16,12 @@ ASCIIVision is a single Rust binary that packs an absurd amount of functionality
 - **Shell Execution** -- run any bash command inline with `!<cmd>`, plus `/curl` and `/brew` shortcuts
 - **ASCII Video Playback** -- MP4 files and streamed YouTube sources decoded to real-time colored ASCII art via FFmpeg
 - **Live Webcam** -- your camera feed converted to ASCII art in real-time, with error reporting when the device is busy
-- **WebSocket Video Chat** -- host or join multi-user live ASCII video chat rooms
-- **3D Terminal Effects** -- rainbow matrix rain, plasma fields, 3D starfield, wireframe rotating cube, fire simulation, particle storms
+- **Command Palette** -- Ctrl+P fuzzy-searches every command, effect, game, layout, and AI provider; Enter executes it
+- **WebSocket Video Chat with Room Codes** -- `/host` starts a room and prints a short code; a friend types `/join <code>` -- no URLs, no IP hunting
+- **Ray-Marched Terminal Graphics** -- SDF ray marching with real lighting (key/fill/specular/fresnel/fog/gamma) rendered in half-block subpixels: Torus Knot, Metaballs, Tunnel, Synthwave grid, Julia set, plus the classic six (matrix rain, plasma, starfield, wireframe cube, fire, particles)
 - **Tiles Window** -- real PTY-backed embedded terminals for Codex, Claude, Gemini, shells, and any other CLI app, in 1-8 way grids
-- **Hyprland-Style Tiling** -- move, swap, resize, and reassign panels with Ctrl+hjkl keybindings and 6 layout presets
-- **Games Window** -- playable Pac-Man, Space Invaders, and 3D Penguin inside a focused tile with selector + WASD controls
+- **Hyprland-Style Tiling** -- move, swap, resize, and reassign panels with Ctrl+hjkl keybindings and 8 layout presets
+- **Arcade with Online Multiplayer** -- seven games: Pong and Tron light cycles (vs AI, local 2-player, or online vs a `/host`//`/join` peer), Snake, Breakout, Pac-Man, Space Invaders, and 3D Penguin
 - **System Monitor** -- live CPU, memory, swap, network I/O, load average, per-core sparklines
 - **Conversation Analytics** -- real-time stats dashboard with message counts, provider breakdown, bar charts
 - **Context Management** -- automatic summarization of older messages when the context window fills up, @-file injection, pinnable messages, persistent agent memory across sessions
@@ -158,10 +159,11 @@ Options:
 
 | Key | Action |
 |-----|--------|
-| `F1` | Help overlay |
+| `Ctrl+P` | **Command palette** -- fuzzy-search and run any command, effect, game, layout, or provider |
+| `F1` | Help overlay (scrollable, generated from the live command registry) |
 | `F2` | Cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama) |
 | `F3` | Toggle video panel |
-| `F4` | Cycle 3D effects, then off, then repeat |
+| `F4` | Cycle the 11 effects, then off, then repeat |
 | `F5` | Toggle webcam capture |
 | `F6` | Cycle tiling layout preset |
 | `F7` | Boot/focus the Tiles PTY panel |
@@ -207,10 +209,15 @@ The focused tile is highlighted with a double border.
 | `/youtube <url>` | Resolve and stream a YouTube video into the video panel using `yt-dlp` |
 | `/webcam` | Toggle webcam |
 | `/3d` or `/effects` | Toggle 3D effects |
-| `/fx` | Cycle 3D effects, then off |
+| `/fx` | Cycle effects, then off |
+| `/fx <name>` | Jump straight to an effect (e.g. `/fx torus`, `/fx synthwave`) |
+| `/host [port]` | Host a video chat room and print a shareable room code (default port 9999) |
+| `/join <code>` | Join a friend's room by its short code |
+| `/invite` | Re-print the room code and join instructions |
+| `/disconnect` | Leave the current video chat room |
 | `/analytics` | Show analytics in focused tile |
 | `/games` | Show the games panel in the focused tile |
-| `/games <pacman|space|penguin>` | Launch a specific game in the games panel |
+| `/games <name>` | Launch a game: pacman, space, penguin, pong, tron, snake, breakout |
 | `/tiles` | Boot the Tiles panel with 2 live embedded terminals |
 | `/tiles <1-8>` | Set the Tiles panel to a specific live terminal count |
 | `/sysmon` | Show system monitor in focused tile |
@@ -224,6 +231,8 @@ The focused tile is highlighted with a double border.
 | `/randomize` | Randomize all UI colors |
 | `/theme reset` | Restore default color palette |
 | `/help` | Toggle help overlay |
+
+Anything that isn't a command goes to the AI as chat. Mistyped commands (`/hots`) are caught with a hint instead of silently burning AI tokens; to force something that looks like a command through to the AI anyway, start the line with a space.
 
 `./install.sh` installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and Ollama for you. If you do a manual setup, make sure both are installed and available before using `/youtube` or the Ollama provider.
 `/youtube` now streams directly into the video bus by resolving a playable media URL first, so it no longer has to cache the full video before playback starts.
@@ -241,6 +250,8 @@ Ollama model selection is populated from the local machine at runtime. ASCIIVisi
 | **Quad** | 2x2-ish grid: transcript, video, 3D effects, webcam+sysmon |
 | **Webcam Focus** | Webcam top-right, 3D Effects below it, transcript+sysmon left |
 | **Full Focus** | Single full-screen transcript |
+| **Video Chat** | Remote feeds + chat + roster arranged for a call (applied automatically by `/host` and `/join`) |
+| **Arcade** | Big games tile + transcript column (applied automatically by `/games`) |
 
 Every tile can be reassigned to any of 13 panel types: Transcript, Games, Tiles, Video, Webcam, Telemetry, Ops Deck, 3D Effects, Analytics, Video Chat Feeds, Video Chat Messages, Video Chat Users, or System Monitor.
 
@@ -248,12 +259,30 @@ Every tile can be reassigned to any of 13 panel types: Transcript, Games, Tiles,
 
 ## Games Window
 
-Focus a tile and press `F8` or `Ctrl+n` until it becomes `GAMES`, or run `/games`.
+Run `/games` (applies the Arcade layout), pick a game from the palette (`Ctrl+P`, type its name), or focus a tile and press `F8`/`Ctrl+n` until it becomes `GAMES`.
 
-- **Selection** -- `1`, `2`, `3`, arrow keys, or `WASD` choose between Pac-Man, Space Invaders, and 3D Penguin
-- **Launch** -- `Enter` or `Space`
-- **Play** -- `WASD` control the active game while the Games tile is focused and the input prompt is empty
+- **Selection** -- number keys, arrow keys, or `WASD` choose between the seven games; `Enter` or `Space` launches
+- **Play** -- `WASD`/arrows control the active game while the Games tile is focused and the input prompt is empty
 - **Reset / Exit** -- `R` restarts the current game, `Esc` returns to the games selector
+
+| Game | Modes |
+|------|-------|
+| **Pong** | vs AI, local 2-player (W/S vs arrows), online host/join |
+| **Tron Light Cycles** | vs AI, local 2-player, online host/join |
+| **Snake** | single-player, speed ramps as you grow |
+| **Breakout** | single-player, 3 lives, theme-colored brick rows |
+| **Pac-Man** | the classic, ghosts included |
+| **Space Invaders** | the classic |
+| **3D Penguin** | perspective-projected penguin playground |
+
+### Online multiplayer
+
+1. Connect two machines with `/host` on one and `/join <code>` on the other (see Video Chat below)
+2. Both players open the same game (`/games pong` or `/games tron`)
+3. One picks **HOST ONLINE**, the other picks **JOIN ONLINE** from the in-game mode menu
+4. The handshake locks in automatically and the match starts with a countdown -- host runs the simulation, guest stays smooth with prediction
+
+If a friend invites you while you're in the selector, a banner tells you exactly what to press.
 
 ---
 
@@ -271,14 +300,21 @@ Focus a tile and press `F8` or `Ctrl+n` until it becomes `TILES`, press `F7`, or
 
 ## 3D Effects
 
-Six terminal-rendered visual effects, cycled with `F4` or `/fx`, then turned off on the next cycle:
+Eleven terminal-rendered visual effects, cycled with `F4` or `/fx`, jumped to by name with `/fx <name>` or the palette. The five showpieces are true ray-marched/procedurally-shaded scenes drawn with half-block subpixels (double vertical resolution), two-light shading, fresnel rim, distance fog, and gamma correction -- a WebGL demo look, still 100% characters:
 
-1. **Rainbow Matrix Rain** -- cascading characters with per-column rainbow hues that drift over time, white head glow, color-tinted backgrounds
-2. **Plasma Field** -- RGB sine-wave interference patterns with smooth color cycling
-3. **3D Starfield** -- perspective-projected stars flying toward the camera with depth-based brightness
-4. **Wireframe 3D** -- rotating cube rendered with ASCII line-drawing and labeled vertices
-5. **Fire Simulation** -- bottom-up flame propagation with heat diffusion and ember colors
-6. **Particle Storm** -- multi-colored particles exploding from center with gravity and fade
+1. **Torus Knot** -- ray-marched rotating interlocked ring, specular-lit
+2. **Metaballs** -- gooey smooth-min spheres orbiting and merging
+3. **Tunnel** -- infinite fly-through with animated walls
+4. **Synthwave** -- perspective grid, glowing horizon sun
+5. **Julia** -- animated Julia-set zoom with smooth iteration coloring
+6. **Rainbow Matrix Rain** -- cascading characters with per-column rainbow hues
+7. **Plasma Field** -- sine-interference plasma, now in half-block subpixels
+8. **3D Starfield** -- perspective-projected starfield with depth-based brightness
+9. **Wireframe 3D** -- rotating cube with glow-line rendering
+10. **Fire Simulation** -- bottom-up flame propagation with heat diffusion
+11. **Particle Storm** -- particles with gravity and fade
+
+All effects are frame-rate independent and budgeted to stay well under the 16ms frame tick.
 
 ---
 
@@ -310,24 +346,26 @@ Live camera capture converted to ASCII art using FFmpeg's AVFoundation (macOS), 
 
 ## WebSocket Video Chat
 
-Host a server and connect clients for multi-user live ASCII webcam streaming in the terminal.
+Multi-user live ASCII webcam streaming in the terminal. The easy way:
+
+```
+# Machine A (in the app):
+/host                      -> prints  ROOM CODE: 82P22-DWBNH
+
+# Machine B (same network, in the app):
+/join 82P22-DWBNH
+```
+
+That's it -- `/host` starts the server, connects you to it, applies the Video Chat layout, and prints the code (codes are case- and dash-insensitive). `/invite` re-prints it, `/disconnect` leaves. Set your name with `/username <name>` before joining.
+
+The manual way still works for cross-network or scripted setups:
 
 ```bash
-# Machine A: host the server
-asciivision --serve 8080
-
-# Machine B: connect as a client
-asciivision --connect ws://192.168.1.100:8080 --username alice --webcam
+asciivision --serve 8080                                          # host
+asciivision --connect ws://192.168.1.100:8080 --username alice    # client (connects on launch)
 ```
 
-Or use slash commands at runtime:
-```
-/server 8080
-/connect ws://192.168.1.100:8080
-/chat hello everyone
-```
-
-The video chat panel shows up to 4 remote feeds in a grid, a chat stream, and a connected users list.
+Runtime commands: `/server 8080`, `/connect ws://host:port`, `/chat <msg>`. The video chat layout shows your own feed plus up to 3 remote feeds in a grid (with a "(you)" tag on yours), a chat stream, and a connected users list -- and once connected, Pong and Tron can be played online against anyone in the room. Dead connections are detected automatically on both ends, and if your opponent drops mid-match the game tells you instead of freezing.
 
 ---
 
@@ -342,19 +380,24 @@ asciivision/
 ├── src/
 │   ├── main.rs          # App shell: modes, rendering, input dispatch, tiling integration
 │   ├── ai.rs            # Multi-provider AI client with streaming (Claude, Grok, GPT-5, Gemini, Ollama)
+│   ├── commands.rs      # Command registry: single source of truth for every slash command
+│   ├── palette.rs       # Ctrl+P fuzzy command palette
+│   ├── shader.rs        # "ASCII GPU": SDF ray marcher, lighting, half-block subpixel drivers
+│   ├── effects.rs       # Effects registry: 11 effects on a common trait
+│   ├── games/           # Arcade: registry trait + 7 games (pong/tron with online netcode)
+│   ├── roomcode.rs      # Short room codes <-> IPv4:port (Crockford base32) + LAN IP detection
 │   ├── tools.rs         # Agentic tool definitions and execution (shell, files, search, HTTP, sysinfo)
 │   ├── memory.rs        # Persistent agent memory (SQLite-backed key-value store)
 │   ├── video.rs         # FFmpeg-based MP4 to ASCII art decoder
 │   ├── webcam.rs        # Live webcam capture with ASCII conversion + error reporting
 │   ├── shell.rs         # Async shell command execution with timeout
 │   ├── db.rs            # SQLite conversation persistence
-│   ├── tiling.rs        # Binary-tree tiling window manager with 6 presets + min-size enforcement
+│   ├── tiling.rs        # Binary-tree tiling window manager with 8 presets + min-size enforcement
 │   ├── theme.rs         # Global dynamic color theme engine with HSL random palette generation
 │   ├── sysmon.rs        # System monitor (CPU, memory, network, load)
-│   ├── effects.rs       # 3D terminal effects engine (6 effects, rainbow matrix)
 │   ├── analytics.rs     # Conversation analytics dashboard with bar charts
-│   ├── server.rs        # WebSocket video chat server (multi-user broadcast)
-│   ├── client.rs        # WebSocket video chat client (webcam + chat)
+│   ├── server.rs        # WebSocket video chat + game relay server (protocol v2)
+│   ├── client.rs        # WebSocket client (webcam, chat, game messages, keepalive)
 │   └── message.rs       # WebSocket protocol message types
 ├── archive/
 │   ├── mega-cli/        # Legacy standalone multi-AI chat app

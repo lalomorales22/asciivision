@@ -14,6 +14,7 @@ use std::{
     collections::VecDeque,
     net::SocketAddrV4,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -217,6 +218,9 @@ enum AppEvent {
         username: String,
     },
     NetUserLeft {
+        /// server-assigned id of the peer that left -- forwarded to the games
+        /// glue so an online match against them ends (finding #4)
+        user_id: String,
         username: String,
     },
 }
@@ -275,6 +279,10 @@ struct App {
     game_net_rx: Option<mpsc::UnboundedReceiver<(String, serde_json::Value)>>,
     /// last my_id passed to games.set_net (Welcome can arrive after connect)
     game_net_my_id: Option<String>,
+    /// bumped on every new dial and on /disconnect; a connect-retry loop
+    /// whose generation is stale stops instead of resurrecting a replaced or
+    /// cancelled client (finding #6)
+    dial_generation: Arc<AtomicU64>,
     username: String,
     /// cached body area for tiling direction calculations
     body_area: Rect,
@@ -451,6 +459,7 @@ impl App {
             game_net_tx: None,
             game_net_rx: None,
             game_net_my_id: None,
+            dial_generation: Arc::new(AtomicU64::new(0)),
             username: args.username.clone(),
             body_area: Rect::default(),
 
@@ -803,6 +812,9 @@ impl App {
                             "APPROVAL REQUIRED: agent wants to execute:\n  {}\nPress Enter to approve, Esc to reject",
                             summary.join("\n  ")
                         ));
+                        // finding #20: never leave the palette hiding an
+                        // approval prompt -- Enter/Esc must mean approve/reject
+                        self.palette.close();
                         self.pending_approval = Some(PendingApprovalState {
                             tool_calls,
                             context,
@@ -928,6 +940,8 @@ impl App {
                                     "APPROVAL REQUIRED: agent wants to execute:\n  {}\nPress Enter to approve, Esc to reject",
                                     summary.join("\n  ")
                                 ));
+                                // finding #20: see the AiToolCalls branch
+                                self.palette.close();
                                 self.pending_approval = Some(PendingApprovalState {
                                     tool_calls,
                                     context,
@@ -965,6 +979,8 @@ impl App {
                     if session_id != self.session_id {
                         continue;
                     }
+                    // finding #20: see the AiToolCalls branch
+                    self.palette.close();
                     self.pending_approval = Some(PendingApprovalState {
                         tool_calls,
                         context,
@@ -1074,7 +1090,11 @@ impl App {
                     self.add_system_message(format!("videochat: {} joined the room", username));
                     self.status_note = format!("{} joined", truncate(&username, 24));
                 }
-                AppEvent::NetUserLeft { username } => {
+                AppEvent::NetUserLeft { user_id, username } => {
+                    // finding #4: a vanished peer must reach online games --
+                    // if an online match is locked to this user, it ends as
+                    // if they sent quit instead of freezing forever.
+                    self.games.peer_disconnected(Some(&user_id));
                     self.add_system_message(format!("videochat: {} left the room", username));
                     self.status_note = format!("{} left", truncate(&username, 24));
                 }
@@ -1162,6 +1182,26 @@ impl App {
             && self.handle_ollama_picker_key(key)
         {
             return Ok(false);
+        }
+
+        // Finding #20: a tool approval that landed while the palette was open
+        // must win the keyboard. Close the palette and fall through so this
+        // very Enter/Esc reaches the approve/reject flow below.
+        if self.palette.is_open() && self.pending_approval.is_some() {
+            self.palette.close();
+            self.status_note = "palette closed -- tool approval pending".to_string();
+        }
+
+        // Finding #7: F-keys bypass the palette interceptor below, and their
+        // side effects can open another modal (F2 -> provider cycle -> Ollama
+        // picker) which would render UNDER the palette while stealing its
+        // keys. Close the palette first, then let the F-key process normally.
+        // The mirror case is already safe: while the Ollama picker is open,
+        // Ctrl+P is consumed by the picker interceptor above, so the palette
+        // cannot stack on top of the picker.
+        if self.palette.is_open() && matches!(key.code, KeyCode::F(_)) {
+            self.palette.close();
+            self.status_note = "palette closed".to_string();
         }
 
         // Command palette: modal interceptor (same bypass list as the Ollama
@@ -1368,9 +1408,10 @@ impl App {
                 if self.pending_approval.is_some() && self.input.is_empty() {
                     self.approve_pending();
                 } else {
-                    let input = self.input.trim().to_string();
-                    self.input.clear();
-                    if !input.is_empty() {
+                    // keep leading whitespace: it is the explicit
+                    // "send this to the AI" escape hatch (finding #21)
+                    let input = std::mem::take(&mut self.input);
+                    if !input.trim().is_empty() {
                         self.dispatch_input(input);
                     }
                 }
@@ -1449,6 +1490,14 @@ impl App {
     fn dispatch_input(&mut self, input: String) {
         self.follow_tail = true;
 
+        // A leading space always forces the input to the AI, bypassing the
+        // command/shell prefixes entirely (finding #21).
+        if input.starts_with(char::is_whitespace) {
+            self.start_ai(input.trim().to_string());
+            return;
+        }
+        let input = input.trim().to_string();
+
         // !<command> raw shell escape hatch
         if let Some(rest) = input.strip_prefix('!') {
             let command = rest.trim();
@@ -1461,7 +1510,9 @@ impl App {
         }
 
         // Slash commands resolve through the registry. Unknown commands are
-        // guarded here: a typo never leaks to the AI as a chat prompt.
+        // guarded here only when the input is command-shaped: a typo never
+        // leaks to the AI, but a filesystem path or a longer '/'-leading
+        // sentence is a prompt and still reaches the model (finding #21).
         if input.starts_with('/') {
             let (token, args) = match input.split_once(char::is_whitespace) {
                 Some((token, rest)) => (token, rest.trim()),
@@ -1473,12 +1524,16 @@ impl App {
                     self.run_command(id, args);
                 }
                 None => {
-                    self.add_system_message(format!(
-                        "unknown command {} — press Ctrl+P for the palette or F1 for the manual",
-                        token
-                    ));
-                    self.status_note =
-                        format!("unknown command {} — Ctrl+P or /help", truncate(token, 24));
+                    if looks_like_mistyped_command(&input) {
+                        self.add_system_message(format!(
+                            "unknown command {} — press Ctrl+P for the palette, F1 for the manual, or prefix with a space to send it to the AI",
+                            token
+                        ));
+                        self.status_note =
+                            format!("unknown command {} — Ctrl+P or /help", truncate(token, 24));
+                        return;
+                    }
+                    self.start_ai(input);
                 }
             }
             return;
@@ -1803,10 +1858,33 @@ impl App {
                     self.add_system_message("already in a room -- /disconnect first");
                     return;
                 }
-                if self.start_chat_server(port) {
-                    self.start_video_client(format!("ws://127.0.0.1:{}", port));
-                    self.print_room_invite();
-                    self.status_note = format!("hosting room on :{}", port);
+                // finding #5: after /disconnect the server keeps listening, so
+                // a repeat /host must rejoin the running room instead of dead-
+                // ending on "server already running" without a client.
+                match self.chat_server_port {
+                    Some(running) if running == port => {
+                        self.add_system_message(format!(
+                            "rejoining your running room on :{}",
+                            port
+                        ));
+                        self.start_video_client(format!("ws://127.0.0.1:{}", port));
+                        self.print_room_invite();
+                        self.status_note = format!("hosting room on :{}", port);
+                    }
+                    Some(running) => {
+                        self.add_system_message(format!(
+                            "server already on :{} -- /host {} to rejoin it",
+                            running, running
+                        ));
+                        self.status_note = format!("server already on :{}", running);
+                    }
+                    None => {
+                        if self.start_chat_server(port) {
+                            self.start_video_client(format!("ws://127.0.0.1:{}", port));
+                            self.print_room_invite();
+                            self.status_note = format!("hosting room on :{}", port);
+                        }
+                    }
                 }
             }
             CommandId::Join => {
@@ -1842,8 +1920,14 @@ impl App {
                 self.print_room_invite();
             }
             CommandId::Disconnect => {
+                // cancel any dial retry loop still in flight (finding #6)
+                self.dial_generation.fetch_add(1, AtomicOrdering::SeqCst);
                 if let Some(vc) = self.video_chat.take() {
                     vc.disconnect();
+                    // finding #4: leaving the room ends any online game
+                    // session immediately (the opponent gets our quit or
+                    // their own UserLeft; we must not keep simulating them)
+                    self.games.peer_disconnected(None);
                     if let Some(port) = self.chat_server_port {
                         self.add_system_message(format!(
                             "left the room (your server is still listening on :{})",
@@ -2172,6 +2256,10 @@ impl App {
                 self.game_net_my_id = my_id;
             }
         } else if self.game_net_tx.is_some() {
+            // finding #4: the link just died (connection lost, kicked, or
+            // /disconnect) -- end any online game session instead of leaving
+            // a zombie match simulating a vanished opponent.
+            self.games.peer_disconnected(None);
             self.games.set_net(None, None);
             self.game_net_tx = None;
             self.game_net_rx = None;
@@ -2214,7 +2302,9 @@ impl App {
                 },
                 NetEvent::Disconnected { reason } => AppEvent::NetStatus { message: reason },
                 NetEvent::UserJoined { username } => AppEvent::NetUserJoined { username },
-                NetEvent::UserLeft { username } => AppEvent::NetUserLeft { username },
+                NetEvent::UserLeft { user_id, username } => {
+                    AppEvent::NetUserLeft { user_id, username }
+                }
             };
             let _ = events_tx.send(app_event);
         }
@@ -2224,17 +2314,41 @@ impl App {
     /// Arc and the connecting instance are one and the same (this replaces
     /// the old broken temp-client pattern).
     fn start_video_client(&mut self, url: String) {
+        // Finding #6: never overwrite a stored client without killing it
+        // first. A previous dial can still be in flight (is_connected() is
+        // false the whole time), and its connect task holds its own Arc --
+        // left alone it would eventually join the room as an orphaned ghost
+        // (4 leaked tasks + a second webcam capture + duplicate presence).
+        if let Some(old) = self.video_chat.take() {
+            old.disconnect();
+            self.add_system_message("replacing the previous connection attempt");
+        }
         let client = Arc::new(VideoChatClient::new(self.username.clone(), url));
         client.set_event_hook(self.net_event_hook());
         self.video_chat = Some(Arc::clone(&client));
         let events_tx = self.events_tx.clone();
+        let dial_generation = Arc::clone(&self.dial_generation);
+        let my_generation = dial_generation.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         tokio::spawn(async move {
             // a couple of quick retries cover the /host self-connect racing
             // the server's accept loop startup
             let mut attempt = 0;
             loop {
+                // superseded by a newer dial or /disconnect? stop, don't
+                // resurrect a replaced client (finding #6)
+                if dial_generation.load(AtomicOrdering::SeqCst) != my_generation {
+                    client.disconnect();
+                    break;
+                }
                 match Arc::clone(&client).connect().await {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        // the dial itself cannot be cancelled mid-await; if
+                        // we were superseded while it ran, tear it down now
+                        if dial_generation.load(AtomicOrdering::SeqCst) != my_generation {
+                            client.disconnect();
+                        }
+                        break;
+                    }
                     Err(error) => {
                         attempt += 1;
                         if attempt >= 3 {
@@ -3181,28 +3295,42 @@ impl App {
         });
 
         if let Some(ref vc) = self.video_chat {
-            let frames = vc.remote_frames.read();
-            if frames.is_empty() {
-                if let Some(ref local) = *vc.local_frame.read() {
-                    render_ascii_frame(frame.buffer_mut(), inner, local, 0.9);
-                    render_gradient_text(
-                        frame.buffer_mut(),
-                        inner.x + 1,
-                        inner.y,
-                        &format!("{} (you)", self.username),
-                        t().accent4,
-                        t().text,
-                    );
+            let remote = vc.remote_frames.read();
+            let local = vc.local_frame.read();
+
+            // Finding #9: the v3 server never echoes our own frames back, so
+            // the self-view must come from local_frame. It is ALWAYS tile 0
+            // ("you"); remote feeds fill the remaining tiles, capped at 4
+            // total. Feeds beyond the grid are summarized as "+N more".
+            let mut tiles: Vec<(String, &video::AsciiFrame, bool)> = Vec::new();
+            if let Some(ref own) = *local {
+                tiles.push((format!("{} (you)", self.username), own, true));
+            }
+            let mut remotes: Vec<(&String, &String, &video::AsciiFrame)> = remote
+                .iter()
+                .map(|(uid, (uname, ascii))| (uname, uid, ascii))
+                .collect();
+            // stable grid order (HashMap iteration order must not decide
+            // which feeds are shown when more than 4 are live)
+            remotes.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(b.1)));
+            let mut overflow = 0usize;
+            for (uname, _uid, ascii) in remotes {
+                if tiles.len() < 4 {
+                    tiles.push((uname.clone(), ascii, false));
                 } else {
-                    frame.render_widget(
-                        Paragraph::new("waiting for video feeds...")
-                            .style(Style::default().fg(t().muted).bg(t().panel_bg))
-                            .alignment(Alignment::Center),
-                        inner,
-                    );
+                    overflow += 1;
                 }
+            }
+
+            if tiles.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("waiting for video feeds...")
+                        .style(Style::default().fg(t().muted).bg(t().panel_bg))
+                        .alignment(Alignment::Center),
+                    inner,
+                );
             } else {
-                let count = frames.len().min(4);
+                let count = tiles.len();
                 let cols = if count <= 2 { count } else { 2 };
                 let rows = (count + cols - 1) / cols;
 
@@ -3214,8 +3342,7 @@ impl App {
                     .constraints(row_constraints)
                     .split(inner);
 
-                let my_id = vc.my_id();
-                let mut frame_iter = frames.iter();
+                let mut tile_iter = tiles.iter();
                 for r in 0..rows {
                     let col_constraints: Vec<Constraint> = (0..cols)
                         .map(|_| Constraint::Percentage((100 / cols) as u16))
@@ -3226,25 +3353,39 @@ impl App {
                         .split(row_layout[r]);
 
                     for c in 0..cols {
-                        if let Some((uid, (uname, ascii_frame))) = frame_iter.next() {
+                        if let Some((label, ascii_frame, is_self)) = tile_iter.next() {
                             let cell_area = col_layout[c];
-                            render_ascii_frame(frame.buffer_mut(), cell_area, ascii_frame, 0.85);
-                            let is_self = my_id.as_deref() == Some(uid.as_str());
-                            let label = if is_self {
-                                format!("{} (you)", uname)
-                            } else {
-                                uname.clone()
-                            };
+                            render_ascii_frame(
+                                frame.buffer_mut(),
+                                cell_area,
+                                ascii_frame,
+                                if *is_self { 0.9 } else { 0.85 },
+                            );
                             render_gradient_text(
                                 frame.buffer_mut(),
                                 cell_area.x + 1,
                                 cell_area.y,
-                                &label,
-                                if is_self { t().accent3 } else { t().accent4 },
+                                label,
+                                if *is_self { t().accent3 } else { t().accent4 },
                                 t().text,
                             );
                         }
                     }
+                }
+
+                if overflow > 0 {
+                    render_gradient_text(
+                        frame.buffer_mut(),
+                        inner.x + 1,
+                        inner.y + inner.height.saturating_sub(1),
+                        &format!(
+                            "+{} more feed{} off-grid",
+                            overflow,
+                            if overflow == 1 { "" } else { "s" }
+                        ),
+                        t().accent1,
+                        t().text,
+                    );
                 }
             }
         } else {
@@ -3625,6 +3766,10 @@ impl App {
         lines.push(header("KEYS"));
         for (key, what) in [
             ("Ctrl+P", "command palette (fuzzy search everything)"),
+            (
+                "Ctrl+P (in Tiles)",
+                "still the palette, even in a PTY tile -- use Up arrow for shell history",
+            ),
             ("F1", "toggle this manual"),
             ("F2", "cycle AI provider (Claude, Grok, GPT-5, Gemini, Ollama)"),
             ("F3", "toggle live video panel"),
@@ -3689,7 +3834,19 @@ impl App {
             horizontal: 2,
             vertical: 1,
         });
-        let max_scroll = lines.len().saturating_sub(inner.height as usize);
+        // Finding #17: the Paragraph word-wraps, so clamp the scroll against
+        // the ESTIMATED wrapped row count at the overlay's inner width (same
+        // idiom as render_messages_inner) -- clamping to the logical line
+        // count leaves the bottom sections unreachable on narrow terminals.
+        let wrap_width = inner.width.max(1) as usize;
+        let total_rows: usize = lines
+            .iter()
+            .map(|line| {
+                let w = line.width();
+                if w == 0 { 1 } else { (w + wrap_width - 1) / wrap_width }
+            })
+            .sum();
+        let max_scroll = total_rows.saturating_sub(inner.height as usize);
         self.help_scroll = self.help_scroll.min(max_scroll);
 
         frame.render_widget(
@@ -4227,6 +4384,31 @@ fn truncate(value: &str, max_chars: usize) -> String {
     }
 }
 
+/// Finding #21: decide whether a '/'-prefixed input that matched no
+/// registered command is a *mistyped command* (guard it with a hint) or a
+/// *prompt* that must reach the AI (paths, sentences).
+///
+/// Command-shaped means BOTH:
+///   - the first token matches `^/[A-Za-z0-9_-]{1,16}$` (so no second '/'
+///     and no '.', which rules out filesystem paths and file names), and
+///   - the whole input has at most 3 whitespace-separated tokens (a longer
+///     input is a sentence, e.g. "/tmp has weird perms?").
+fn looks_like_mistyped_command(input: &str) -> bool {
+    let mut words = input.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let Some(body) = first.strip_prefix('/') else {
+        return false;
+    };
+    let token_ok = !body.is_empty()
+        && body.len() <= 16
+        && body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    token_ok && words.count() <= 2 // first token + at most 2 more = 3 total
+}
+
 fn hash32(x: u16, y: u16, seed: u32) -> u32 {
     let mut value = x as u32;
     value = value.wrapping_mul(0x45d9f3b);
@@ -4365,4 +4547,38 @@ async fn main() -> Result<()> {
     terminal.show_cursor()?;
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_mistyped_command;
+
+    /// Finding #21: typo-shaped slash inputs stay guarded.
+    #[test]
+    fn mistyped_commands_are_guarded() {
+        assert!(looks_like_mistyped_command("/hots"));
+        assert!(looks_like_mistyped_command("/hots 9999"));
+        assert!(looks_like_mistyped_command("/joim K7QM3-XZ2AB"));
+        assert!(looks_like_mistyped_command("/tmp")); // accepted narrow miss
+        assert!(looks_like_mistyped_command("/fx torus knot"));
+        assert!(looks_like_mistyped_command("/a-b_c2"));
+    }
+
+    /// Finding #21: paths and '/'-leading sentences must reach the AI.
+    #[test]
+    fn paths_and_sentences_reach_the_ai() {
+        // second '/' or '.' in the token -> path or file, not a command
+        assert!(!looks_like_mistyped_command("/Users/me/notes.txt explain"));
+        assert!(!looks_like_mistyped_command("/etc/hosts is blocking me, why?"));
+        assert!(!looks_like_mistyped_command("/notes.txt summarize"));
+        assert!(!looks_like_mistyped_command("/Users/x/y.txt"));
+        // more than 3 whitespace-separated tokens -> a sentence
+        assert!(!looks_like_mistyped_command("/tmp has weird perms?"));
+        // over-long token -> not a plausible command name
+        assert!(!looks_like_mistyped_command("/waytoolongcommandname"));
+        // bare or empty slash tokens are not command-shaped
+        assert!(!looks_like_mistyped_command("/"));
+        assert!(!looks_like_mistyped_command("/ what is this"));
+        assert!(!looks_like_mistyped_command(""));
+    }
 }

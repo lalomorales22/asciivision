@@ -264,31 +264,38 @@ pub fn ascii_frame_to_ws(frame: &AsciiFrame) -> WsAsciiFrame {
     ws
 }
 
-pub fn ws_frame_to_ascii(ws: &WsAsciiFrame) -> AsciiFrame {
-    let mut cells = Vec::with_capacity(ws.width as usize * ws.height as usize);
-    for i in 0..(ws.width as usize * ws.height as usize) {
-        let idx = i * 4;
-        if idx + 3 < ws.data.len() {
-            cells.push((
-                crate::message::decode_glyph(ws.data[idx]),
-                (ws.data[idx + 1] & 0xff) as u8,
-                (ws.data[idx + 2] & 0xff) as u8,
-                (ws.data[idx + 3] & 0xff) as u8,
-            ));
-        } else {
-            cells.push((' ', 0, 0, 0));
-        }
+/// Decode a wire frame into a renderable [`AsciiFrame`].
+///
+/// Returns `None` for malformed frames (dimensions over the hard caps or a
+/// data buffer whose length does not match `width*height*4`). Validating
+/// BEFORE the allocation is the point: a hostile ~60-byte message claiming
+/// 65535x65535 must never make this function allocate gigabytes (finding #3).
+pub fn ws_frame_to_ascii(ws: &WsAsciiFrame) -> Option<AsciiFrame> {
+    if !ws.is_well_formed() {
+        return None;
     }
-    AsciiFrame {
+    let cell_count = ws.width as usize * ws.height as usize;
+    let mut cells = Vec::with_capacity(cell_count);
+    for i in 0..cell_count {
+        let idx = i * 4;
+        cells.push((
+            crate::message::decode_glyph(ws.data[idx]),
+            (ws.data[idx + 1] & 0xff) as u8,
+            (ws.data[idx + 2] & 0xff) as u8,
+            (ws.data[idx + 3] & 0xff) as u8,
+        ));
+    }
+    Some(AsciiFrame {
         width: ws.width,
         height: ws.height,
         cells,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::{MAX_FRAME_HEIGHT, MAX_FRAME_WIDTH};
 
     #[test]
     fn frame_converters_roundtrip_unicode_glyphs() {
@@ -298,22 +305,56 @@ mod tests {
             cells: vec![('▀', 255, 0, 0), ('█', 0, 255, 0), ('X', 0, 0, 255)],
         };
         let ws = ascii_frame_to_ws(&frame);
-        let back = ws_frame_to_ascii(&ws);
+        let back = ws_frame_to_ascii(&ws).expect("well-formed frame decodes");
         assert_eq!(back.width, 3);
         assert_eq!(back.height, 1);
         assert_eq!(back.cells, frame.cells);
     }
 
     #[test]
-    fn short_wire_buffer_pads_with_black_spaces() {
-        let ws = WsAsciiFrame {
+    fn rejects_wire_buffer_with_mismatched_length() {
+        // short: one cell of data for a claimed two cells
+        let short = WsAsciiFrame {
             width: 2,
             height: 1,
-            data: vec!['A' as u32, 9, 9, 9], // only one cell of data
+            data: vec!['A' as u32, 9, 9, 9],
         };
-        let back = ws_frame_to_ascii(&ws);
-        assert_eq!(back.cells.len(), 2);
-        assert_eq!(back.cells[0], ('A', 9, 9, 9));
-        assert_eq!(back.cells[1], (' ', 0, 0, 0));
+        assert!(ws_frame_to_ascii(&short).is_none());
+
+        // long: extra trailing words are just as suspect
+        let long = WsAsciiFrame {
+            width: 1,
+            height: 1,
+            data: vec![0; 8],
+        };
+        assert!(ws_frame_to_ascii(&long).is_none());
+    }
+
+    #[test]
+    fn rejects_hostile_dimensions_without_allocating() {
+        // the finding-#3 attack: tiny message, gigantic claimed dimensions.
+        // If validation ran after the allocation this test would OOM/abort.
+        let hostile = WsAsciiFrame {
+            width: 65535,
+            height: 65535,
+            data: vec![],
+        };
+        assert!(ws_frame_to_ascii(&hostile).is_none());
+
+        // just past a single cap is rejected too, even with matching data
+        let too_wide = WsAsciiFrame::new(MAX_FRAME_WIDTH + 1, 1);
+        assert!(ws_frame_to_ascii(&too_wide).is_none());
+        let too_tall = WsAsciiFrame::new(1, MAX_FRAME_HEIGHT + 1);
+        assert!(ws_frame_to_ascii(&too_tall).is_none());
+    }
+
+    #[test]
+    fn accepts_maximum_allowed_dimensions() {
+        let ws = WsAsciiFrame::new(MAX_FRAME_WIDTH, MAX_FRAME_HEIGHT);
+        let back = ws_frame_to_ascii(&ws).expect("cap-sized frame is valid");
+        assert_eq!(
+            back.cells.len(),
+            MAX_FRAME_WIDTH as usize * MAX_FRAME_HEIGHT as usize
+        );
     }
 }

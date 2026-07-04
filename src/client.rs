@@ -18,6 +18,10 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
 /// safety cap so an idle app never accumulates unbounded game messages
 const GAME_INBOX_CAP: usize = 512;
+/// a v3 server sends Welcome immediately after Join; if none arrives within
+/// this window the server is a pre-v3 build that would otherwise leave us
+/// half-connected forever (no my_id, games silently dead -- finding #15)
+const WELCOME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A game-scoped message received from another participant
 /// (identity fields are server-authoritative -- they cannot be spoofed).
@@ -37,7 +41,9 @@ pub enum NetEvent {
     Connected { user_id: String },
     Disconnected { reason: String },
     UserJoined { username: String },
-    UserLeft { username: String },
+    /// `user_id` is the server-assigned id -- the games glue needs it to end
+    /// an online match when its locked opponent leaves (finding #4).
+    UserLeft { user_id: String, username: String },
 }
 
 enum Outgoing {
@@ -76,6 +82,8 @@ pub struct VideoChatClient {
     event_hook: RwLock<Option<Arc<dyn Fn(NetEvent) + Send + Sync>>>,
     last_traffic: Arc<RwLock<Instant>>,
     disconnect_reason: Arc<RwLock<Option<String>>>,
+    /// how long to wait for the server's Welcome (tunable only in tests)
+    welcome_timeout: RwLock<Duration>,
 }
 
 impl VideoChatClient {
@@ -100,7 +108,14 @@ impl VideoChatClient {
             event_hook: RwLock::new(None),
             last_traffic: Arc::new(RwLock::new(Instant::now())),
             disconnect_reason: Arc::new(RwLock::new(None)),
+            welcome_timeout: RwLock::new(WELCOME_TIMEOUT),
         }
+    }
+
+    /// Shrink the Welcome watchdog window so tests don't wait 5 real seconds.
+    #[cfg(test)]
+    fn set_welcome_timeout(&self, timeout: Duration) {
+        *self.welcome_timeout.write() = timeout;
     }
 
     /// Install the UI event hook (call before connect). The hook must be
@@ -376,6 +391,36 @@ impl VideoChatClient {
             });
         }
 
+        // welcome watchdog (finding #15): a pre-v3 server accepts the socket
+        // and the Join (serde ignores the extra `version` field) but never
+        // sends Welcome, leaving this client half-connected forever -- my_id
+        // stays None and online games silently never start. Detect the
+        // silence and tear the link down with an explanation instead.
+        {
+            let me = Arc::clone(&self);
+            let mut shutdown = self.shutdown_tx.subscribe();
+            let timeout = *self.welcome_timeout.read();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = wait_shutdown(&mut shutdown) => {}
+                    _ = tokio::time::sleep(timeout) => {
+                        if me.my_id().is_none() {
+                            {
+                                let mut reason = me.disconnect_reason.write();
+                                if reason.is_none() {
+                                    *reason = Some(
+                                        "server incompatible (no welcome) -- both sides need asciivision v3"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                            let _ = me.shutdown_tx.send(true);
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(())
     }
 
@@ -413,8 +458,11 @@ impl VideoChatClient {
                 username,
                 frame,
             } => {
-                let ascii = ws_frame_to_ascii(&frame);
-                self.remote_frames.write().insert(user_id, (username, ascii));
+                // malformed frames (hostile dims / mismatched buffer) decode
+                // to None and are dropped -- never trusted with an allocation
+                if let Some(ascii) = ws_frame_to_ascii(&frame) {
+                    self.remote_frames.write().insert(user_id, (username, ascii));
+                }
             }
             WsMessage::Chat {
                 username, content, ..
@@ -454,7 +502,7 @@ impl VideoChatClient {
                 self.chat_messages
                     .write()
                     .push(("SYSTEM".to_string(), format!("{} left", username)));
-                self.fire(NetEvent::UserLeft { username });
+                self.fire(NetEvent::UserLeft { user_id, username });
             }
             WsMessage::Ping | WsMessage::Pong | WsMessage::Join { .. } => {}
         }
@@ -605,7 +653,8 @@ mod tests {
         assert!(b_events
             .lock()
             .iter()
-            .any(|e| matches!(e, NetEvent::UserLeft { username } if username == "alice")));
+            .any(|e| matches!(e, NetEvent::UserLeft { user_id, username }
+                if username == "alice" && *user_id == a_id)));
 
         // A must not be able to silently reuse the dead pipeline
         let reuse = Arc::clone(&a).connect().await;
@@ -613,6 +662,69 @@ mod tests {
 
         b.disconnect();
         wait_for("bob offline", || !b.is_connected()).await;
+    }
+
+    /// Finding #15: a v1 server accepts the socket and the Join but never
+    /// sends Welcome. The client must not sit half-connected forever -- the
+    /// welcome watchdog disconnects with an actionable status.
+    #[tokio::test]
+    async fn v1_server_silence_triggers_incompatibility_disconnect() {
+        // v1 server sim: complete the websocket handshake, swallow every
+        // inbound message, never reply with anything.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                        let (_tx, mut rx) = ws.split();
+                        while let Some(Ok(_)) = rx.next().await {} // accept + silence
+                    }
+                });
+            }
+        });
+
+        let client = test_client("hopeful", &format!("ws://127.0.0.1:{}", port));
+        client.set_welcome_timeout(Duration::from_millis(300));
+        let events: Arc<PlMutex<Vec<NetEvent>>> = Arc::new(PlMutex::new(Vec::new()));
+        {
+            let sink = Arc::clone(&events);
+            client.set_event_hook(move |ev| sink.lock().push(ev));
+        }
+
+        Arc::clone(&client).connect().await.expect("socket opens fine");
+        assert!(client.is_connected(), "pre-timeout the link looks up");
+
+        wait_for("incompatibility disconnect", || !client.is_connected()).await;
+        assert!(client.my_id().is_none(), "no Welcome must mean no id");
+        assert!(
+            client.get_status().contains("server incompatible"),
+            "status was: {}",
+            client.get_status()
+        );
+        wait_for("disconnected event fires", || {
+            events.lock().iter().any(|e| {
+                matches!(e, NetEvent::Disconnected { reason } if reason.contains("server incompatible"))
+            })
+        })
+        .await;
+    }
+
+    /// The watchdog must NOT fire against a real v3 server: Welcome arrives
+    /// well inside the window and the session keeps running.
+    #[tokio::test]
+    async fn welcome_watchdog_is_inert_on_a_v3_server() {
+        let url = spawn_server();
+        let client = test_client("patient", &url);
+        client.set_welcome_timeout(Duration::from_millis(200));
+        Arc::clone(&client).connect().await.expect("connects");
+        wait_for("welcome", || client.my_id().is_some()).await;
+        // outlive the (shortened) watchdog window, then verify liveness
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(client.is_connected(), "watchdog must not kill a good link");
+        client.disconnect();
     }
 
     /// connect() failures leave the client reusable (needed by /host's retry).

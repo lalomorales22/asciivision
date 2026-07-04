@@ -1,10 +1,13 @@
 //! Pong: vs-AI, local 2P, and online host/join (host-authoritative).
 //!
 //! Wire protocol (payloads inside the app's Game envelope, game = "pong"):
-//!   {"t":"invite"} {"t":"join"} {"t":"start","seed":u64} {"t":"quit"}   handshake
+//!   {"t":"invite"} {"t":"join"} {"t":"start","seed":u64} {"t":"full"}
+//!   {"t":"ka"} {"t":"quit"}                                  handshake + liveness
 //!   {"t":"input","y":f32}                                    guest -> host (on change, <=30Hz)
-//!   {"t":"state","bx","by","vx","vy","p0","p1","s0","s1","ph","cd"}    host -> guest (~17Hz)
-//! ph: 0=lobby 1=serve 2=play 3=over. Guests dead-reckon the ball between
+//!   {"t":"state","bx","by","vx","vy","p0","p1","s0","s1","ph","cd","mg"}  host -> guest (~17Hz)
+//! ph: 0=lobby 1=serve 2=play 3=over. `mg` is the host's match generation:
+//! it bumps on every match reset (rematch), telling the guest to re-center
+//! its locally-predicted paddle. Guests dead-reckon the ball between
 //! snapshots and keep their own paddle locally predicted.
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -14,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 
-use super::net::{Handshake, HsEvent, NetHandle, NetRole, Throttle};
+use super::net::{Handshake, HsEvent, Liveness, NetHandle, NetRole, Throttle};
 use super::{draw_mode_menu, project_axis, CellGrid, Game};
 use crate::theme::t;
 
@@ -36,6 +39,9 @@ const MAX_DEFLECT: f32 = 0.95;
 const SPIN: f32 = 0.35;
 const STATE_HZ: f32 = 17.0;
 const INPUT_HZ: f32 = 30.0;
+/// Max ball travel per collision substep; must stay below the 2.0-cell paddle
+/// capture window so a fast frame can never tunnel the ball through a paddle.
+const SUBSTEP: f32 = 0.8;
 
 /// Reflect a ball off a paddle. `offset` is the contact point relative to the
 /// paddle center in [-1, 1] (clamped a bit beyond for edge grazes),
@@ -56,6 +62,8 @@ pub(super) enum PongMsg {
     Invite,
     Join,
     Start { seed: u64 },
+    Full,
+    Ka,
     Quit,
     Input { y: f32 },
     State {
@@ -69,6 +77,9 @@ pub(super) enum PongMsg {
         s1: u32,
         ph: u8,
         cd: f32,
+        /// Match generation: bumped by the host on every match reset.
+        #[serde(default)]
+        mg: u32,
     },
 }
 
@@ -134,6 +145,10 @@ pub(super) struct PongGame {
     state_throttle: Throttle,
     input_throttle: Throttle,
     last_sent_y: f32,
+    /// Bumped on every match reset; the host broadcasts it so the guest can
+    /// detect rematches and re-center its locally-predicted paddle.
+    match_gen: u32,
+    liveness: Liveness,
     over_msg: String,
 }
 
@@ -162,6 +177,8 @@ impl PongGame {
             state_throttle: Throttle::new(STATE_HZ),
             input_throttle: Throttle::new(INPUT_HZ),
             last_sent_y: PONG_H / 2.0,
+            match_gen: 0,
+            liveness: Liveness::new(),
             over_msg: String::new(),
         }
     }
@@ -176,6 +193,8 @@ impl PongGame {
         self.py = [PONG_H / 2.0; 2];
         self.pv = [0.0; 2];
         self.guest_target = PONG_H / 2.0;
+        self.last_sent_y = PONG_H / 2.0;
+        self.match_gen = self.match_gen.wrapping_add(1);
         self.over_msg.clear();
         self.trail.clear();
         self.serve(serve_dir);
@@ -194,6 +213,7 @@ impl PongGame {
 
     fn begin_online_match(&mut self, seed: u64) {
         let dir = if seed % 2 == 0 { 1.0 } else { -1.0 };
+        self.liveness = Liveness::new();
         self.reset_match(dir);
     }
 
@@ -312,7 +332,27 @@ impl PongGame {
     }
 
     /// Simulate the ball for one frame (authority only, Play phase).
+    /// Substepped (like breakout) so one slow frame at high ball speed cannot
+    /// move the ball across the 2.0-cell paddle window in a single jump.
     fn sim_ball(&mut self, dt: f32) {
+        let dist = ((self.vx * dt).powi(2) + (self.vy * dt).powi(2)).sqrt();
+        let steps = (dist / SUBSTEP).ceil().max(1.0) as u32;
+        let sub = dt / steps as f32;
+        for _ in 0..steps {
+            self.ball_step(sub);
+            if self.phase != Phase::Play {
+                return; // point scored: serve()/match-over took over the ball
+            }
+        }
+
+        self.trail.push_back((self.bx, self.by));
+        while self.trail.len() > 7 {
+            self.trail.pop_front();
+        }
+    }
+
+    /// One collision substep of ball movement (authority only).
+    fn ball_step(&mut self, dt: f32) {
         self.bx += self.vx * dt;
         self.by += self.vy * dt;
 
@@ -352,11 +392,6 @@ impl PongGame {
         } else if self.bx > PONG_W + 1.5 {
             self.score_point(0);
         }
-
-        self.trail.push_back((self.bx, self.by));
-        while self.trail.len() > 7 {
-            self.trail.pop_front();
-        }
     }
 
     /// Guest-side dead reckoning between host snapshots.
@@ -394,6 +429,7 @@ impl PongGame {
             s1: self.scores[1],
             ph: self.phase.code(),
             cd: self.serve_cd,
+            mg: self.match_gen,
         };
         if let Ok(payload) = serde_json::to_value(&msg) {
             self.net.send(GAME, payload);
@@ -415,7 +451,10 @@ impl PongGame {
         }
     }
 
-    /// Apply a host snapshot on the guest. Own paddle stays locally predicted.
+    /// Apply a host snapshot on the guest. Own paddle stays locally predicted,
+    /// except when the match generation bumps (host rematch): then the host
+    /// has re-centered every paddle, so mirror that locally too.
+    #[allow(clippy::too_many_arguments)]
     fn apply_state(
         &mut self,
         bx: f32,
@@ -428,7 +467,17 @@ impl PongGame {
         s1: u32,
         ph: u8,
         cd: f32,
+        mg: u32,
     ) {
+        if mg != self.match_gen {
+            self.match_gen = mg;
+            self.py[self.my_side] = PONG_H / 2.0;
+            self.pv[self.my_side] = 0.0;
+            self.last_sent_y = PONG_H / 2.0;
+            self.hold_up = [0.0; 2];
+            self.hold_down = [0.0; 2];
+            self.trail.clear();
+        }
         self.bx = bx;
         self.by = by;
         self.vx = vx;
@@ -508,9 +557,22 @@ impl PongGame {
 impl Game for PongGame {
     fn tick(&mut self, dt: f32) {
         // handshake keepalive (invite/join re-sends while waiting)
+        let hs_ready = self.hs.as_ref().is_some_and(Handshake::is_ready);
         if let Some(hs) = &mut self.hs {
             if let Some(payload) = hs.tick(dt) {
                 self.net.send(GAME, payload);
+            }
+        }
+        // Once locked, both sides prove presence ~1Hz and treat sustained
+        // inbound silence as a dead peer instead of freezing forever.
+        if hs_ready {
+            let (ka_due, timed_out) = self.liveness.tick(dt);
+            if timed_out {
+                self.abort_online("connection lost — opponent gone");
+                return;
+            }
+            if ka_due {
+                self.net.send(GAME, json!({"t": "ka"}));
             }
         }
         self.decay_holds(dt);
@@ -779,6 +841,10 @@ impl Game for PongGame {
                 self.abort_online("opponent left the match");
                 return;
             }
+            Some(HsEvent::Full) => {
+                self.abort_online("match is full — that host already has a challenger");
+                return;
+            }
             None => {}
         }
 
@@ -789,6 +855,8 @@ impl Game for PongGame {
         if !is_opponent {
             return;
         }
+        // Any payload from the locked opponent (state, input, ka) proves life.
+        self.liveness.on_inbound();
         match serde_json::from_value::<PongMsg>(payload.clone()) {
             Ok(PongMsg::Input { y }) if self.role == NetRole::Host => {
                 self.guest_target = Self::clamp_paddle(y);
@@ -804,10 +872,25 @@ impl Game for PongGame {
                 s1,
                 ph,
                 cd,
+                mg,
             }) if self.role == NetRole::Guest => {
-                self.apply_state(bx, by, vx, vy, p0, p1, s0, s1, ph, cd);
+                self.apply_state(bx, by, vx, vy, p0, p1, s0, s1, ph, cd, mg);
             }
             _ => {}
+        }
+    }
+
+    fn peer_disconnected(&mut self, from_id: Option<&str>) {
+        let Some(hs) = &self.hs else { return };
+        let ends = match from_id {
+            None => true, // we lost our own connection: no online play possible
+            Some(id) => hs.opponent_id.as_deref() == Some(id),
+        };
+        if ends {
+            self.abort_online(match from_id {
+                None => "disconnected — online match ended",
+                Some(_) => "opponent left the match",
+            });
         }
     }
 }
@@ -866,6 +949,8 @@ mod tests {
             PongMsg::Invite,
             PongMsg::Join,
             PongMsg::Start { seed: 99 },
+            PongMsg::Full,
+            PongMsg::Ka,
             PongMsg::Quit,
             PongMsg::Input { y: 12.5 },
             PongMsg::State {
@@ -879,6 +964,7 @@ mod tests {
                 s1: 4,
                 ph: 2,
                 cd: 0.5,
+                mg: 2,
             },
         ];
         for msg in msgs {
@@ -906,8 +992,9 @@ mod tests {
         game.my_side = 1;
         game.py[1] = 30.0;
         game.phase = Phase::Play;
+        let mg = game.match_gen;
 
-        game.apply_state(10.0, 11.0, 5.0, -4.0, 8.0, 20.0, 2, 3, 2, 0.0);
+        game.apply_state(10.0, 11.0, 5.0, -4.0, 8.0, 20.0, 2, 3, 2, 0.0, mg);
         assert_eq!(game.bx, 10.0);
         assert_eq!(game.by, 11.0);
         assert_eq!(game.py[0], 8.0, "opponent paddle comes from the host");
@@ -915,9 +1002,186 @@ mod tests {
         assert_eq!(game.scores, [2, 3]);
         assert_eq!(game.phase, Phase::Play);
 
-        game.apply_state(10.0, 11.0, 5.0, -4.0, 8.0, 20.0, 7, 3, 3, 0.0);
+        game.apply_state(10.0, 11.0, 5.0, -4.0, 8.0, 20.0, 7, 3, 3, 0.0, mg);
         assert_eq!(game.phase, Phase::Over);
         assert!(!game.over_msg.is_empty());
+    }
+
+    #[test]
+    fn rematch_generation_recenters_guest_paddle() {
+        let mut game = PongGame::new(NetHandle::new());
+        game.role = NetRole::Guest;
+        game.mode = Mode::Online;
+        game.my_side = 1;
+        game.begin_online_match(0);
+        let mg = game.match_gen;
+        game.phase = Phase::Over;
+        game.py[1] = 30.0;
+        game.last_sent_y = 30.0;
+
+        // Host pressed R: snapshot arrives with a bumped generation.
+        game.apply_state(36.0, 18.0, 20.0, 0.0, 18.0, 18.0, 0, 0, 1, 2.2, mg + 1);
+        assert_eq!(game.match_gen, mg + 1);
+        assert_eq!(
+            game.py[1],
+            PONG_H / 2.0,
+            "guest's locally-predicted paddle re-centers on rematch"
+        );
+        assert_eq!(game.last_sent_y, PONG_H / 2.0);
+        assert_eq!(game.phase, Phase::Serve);
+
+        // Same generation again: own paddle stays locally predicted.
+        game.py[1] = 12.0;
+        game.apply_state(36.0, 18.0, 20.0, 0.0, 18.0, 18.0, 0, 0, 2, 0.0, mg + 1);
+        assert_eq!(game.py[1], 12.0);
+    }
+
+    #[test]
+    fn fast_ball_cannot_tunnel_through_paddles() {
+        // Max ball speed at the max clamped frame dt used to step 2.75 cells,
+        // clean through the 2.0-cell paddle window. Substepping must catch it.
+        let mut game = PongGame::new(NetHandle::new());
+        game.mode = Mode::Local2P;
+        game.reset_match(1.0);
+        game.phase = Phase::Play;
+
+        // toward the left paddle
+        game.bx = PAD_X0 + 1.1;
+        game.by = game.py[0];
+        game.vx = -MAX_BALL_SPEED;
+        game.vy = 0.0;
+        game.sim_ball(0.05);
+        assert!(game.vx > 0.0, "left paddle must bounce a max-speed ball");
+        assert_eq!(game.scores, [0, 0]);
+
+        // toward the right paddle
+        game.phase = Phase::Play;
+        game.bx = PAD_X1 - 1.1;
+        game.by = game.py[1];
+        game.vx = MAX_BALL_SPEED;
+        game.vy = 0.0;
+        game.sim_ball(0.05);
+        assert!(game.vx < 0.0, "right paddle must bounce a max-speed ball");
+        assert_eq!(game.scores, [0, 0]);
+    }
+
+    #[test]
+    fn ready_guest_times_out_after_peer_silence() {
+        let mut game = PongGame::new(NetHandle::new());
+        game.mode = Mode::Online;
+        game.role = NetRole::Guest;
+        game.my_side = 1;
+        let (mut hs, _) = Handshake::guest();
+        hs.on_net("host-id", "HOSTY", &json!({"t": "start", "seed": 2}));
+        game.hs = Some(hs);
+        game.begin_online_match(2);
+
+        // 4s of silence, then a keepalive from the host: no timeout.
+        for _ in 0..80 {
+            game.tick(0.05);
+        }
+        assert_ne!(game.phase, Phase::Menu, "alive before the timeout");
+        game.handle_net("host-id", "HOSTY", &json!({"t": "ka"}));
+        for _ in 0..80 {
+            game.tick(0.05);
+        }
+        assert_ne!(game.phase, Phase::Menu, "inbound traffic resets the clock");
+
+        // Silence past the threshold ends the session gracefully.
+        for _ in 0..30 {
+            game.tick(0.05);
+        }
+        assert_eq!(game.phase, Phase::Menu);
+        assert!(game.hs.is_none());
+        assert!(game
+            .menu_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("connection lost"));
+    }
+
+    #[test]
+    fn ready_peer_sends_keepalives() {
+        let handle = NetHandle::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        handle.configure(Some(tx), Some("me".to_string()));
+        let mut game = PongGame::new(handle);
+        game.mode = Mode::Online;
+        game.role = NetRole::Guest;
+        game.my_side = 1;
+        let (mut hs, _) = Handshake::guest();
+        hs.on_net("host-id", "HOSTY", &json!({"t": "start", "seed": 2}));
+        game.hs = Some(hs);
+        game.begin_online_match(2);
+
+        for _ in 0..24 {
+            game.tick(0.05); // 1.2s
+        }
+        let mut kas = 0;
+        while let Ok((game_name, payload)) = rx.try_recv() {
+            assert_eq!(game_name, "pong");
+            if payload == json!({"t": "ka"}) {
+                kas += 1;
+            }
+        }
+        assert!(kas >= 1, "a ready peer keepalives about once per second");
+    }
+
+    #[test]
+    fn full_rejection_returns_guest_to_menu() {
+        let mut game = PongGame::new(NetHandle::new());
+        game.mode = Mode::Online;
+        game.role = NetRole::Guest;
+        game.my_side = 1;
+        game.phase = Phase::Lobby;
+        let (hs, _) = Handshake::guest();
+        game.hs = Some(hs);
+
+        game.handle_net("host-id", "HOSTY", &json!({"t": "full"}));
+        assert_eq!(game.phase, Phase::Menu);
+        assert!(game.hs.is_none());
+        assert!(game
+            .menu_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("full"));
+    }
+
+    #[test]
+    fn peer_disconnected_ends_only_matching_sessions() {
+        // Opponent's id ends the match.
+        let mut game = PongGame::new(NetHandle::new());
+        game.mode = Mode::Online;
+        game.role = NetRole::Guest;
+        game.my_side = 1;
+        let (mut hs, _) = Handshake::guest();
+        hs.on_net("host-id", "HOSTY", &json!({"t": "start", "seed": 2}));
+        game.hs = Some(hs);
+        game.begin_online_match(2);
+
+        game.peer_disconnected(Some("someone-else"));
+        assert_ne!(game.phase, Phase::Menu, "unrelated peers leaving is ignored");
+        game.peer_disconnected(Some("host-id"));
+        assert_eq!(game.phase, Phase::Menu);
+        assert!(game.hs.is_none());
+
+        // None (local disconnect) ends any online session, even a waiting lobby.
+        let mut game = PongGame::new(NetHandle::new());
+        game.mode = Mode::Online;
+        game.role = NetRole::Host;
+        let (hs, _) = Handshake::host(1);
+        game.hs = Some(hs);
+        game.phase = Phase::Lobby;
+        game.peer_disconnected(None);
+        assert_eq!(game.phase, Phase::Menu);
+        assert!(game.hs.is_none());
+
+        // Local games are unaffected.
+        let mut game = PongGame::new(NetHandle::new());
+        game.mode = Mode::VsAi;
+        game.reset_match(1.0);
+        game.peer_disconnected(None);
+        assert_eq!(game.phase, Phase::Serve);
     }
 
     #[test]

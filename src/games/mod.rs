@@ -43,6 +43,9 @@ pub(crate) trait Game {
     }
     /// Inbound network payload addressed to this game (already name-routed).
     fn handle_net(&mut self, _from_id: &str, _from_name: &str, _payload: &serde_json::Value) {}
+    /// A peer left the room (`Some(id)`) or our own connection dropped
+    /// (`None`). Online games treat a matching opponent as having quit.
+    fn peer_disconnected(&mut self, _from_id: Option<&str>) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +274,19 @@ impl GamesPanel {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Network layer lost a peer, or the local connection itself.
+    /// `Some(id)`: that user left the room — an online session whose locked
+    /// opponent has this id ends as if they sent quit. `None`: we
+    /// disconnected — any online session ends. Local games are unaffected.
+    pub fn peer_disconnected(&mut self, from_id: Option<&str>) {
+        if let Some(session) = &mut self.session {
+            session.game.peer_disconnected(from_id);
+            if let Some(status) = session.game.status() {
+                self.status = status;
             }
         }
     }
@@ -725,6 +741,50 @@ mod tests {
         assert_eq!(panel.active_kind(), None);
         // ...and Esc in the selector is NOT consumed (falls through to app).
         assert!(!panel.handle_key(key(KeyCode::Esc)));
+    }
+
+    #[test]
+    fn peer_disconnected_reaches_online_session() {
+        let mut panel = GamesPanel::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        panel.set_net(Some(tx), Some("me".to_string()));
+        panel.launch(GameKind::Pong);
+        // Enter online play as guest, then let the host's start lock the match.
+        assert!(panel.handle_key(key(KeyCode::Char('4'))));
+        assert!(panel.status_note().contains("searching for a host"));
+        panel.handle_net(
+            "host-id",
+            "HOSTY",
+            "pong",
+            &serde_json::json!({"t": "start", "seed": 9}),
+        );
+
+        // An unrelated user leaving changes nothing (still in the match).
+        panel.peer_disconnected(Some("bystander-id"));
+        assert!(
+            panel.status_note().contains("ONLINE vs HOSTY"),
+            "match must survive unrelated leavers, got: {}",
+            panel.status_note()
+        );
+
+        // The opponent dropping ends the match and surfaces the menu status.
+        panel.peer_disconnected(Some("host-id"));
+        assert!(
+            panel.status_note().contains("choose a mode"),
+            "session must fall back to the mode menu, got: {}",
+            panel.status_note()
+        );
+
+        // A local disconnect (None) ends any online session too.
+        assert!(panel.handle_key(key(KeyCode::Char('4'))));
+        panel.handle_net(
+            "host-id",
+            "HOSTY",
+            "pong",
+            &serde_json::json!({"t": "start", "seed": 9}),
+        );
+        panel.peer_disconnected(None);
+        assert!(panel.status_note().contains("choose a mode"));
     }
 
     #[test]

@@ -1,12 +1,14 @@
 //! Tron light cycles: vs-AI, local 2P, and online host/join (host-authoritative).
 //!
 //! Wire protocol (payloads inside the app's Game envelope, game = "tron"):
-//!   {"t":"invite"} {"t":"join"} {"t":"start","seed":u64} {"t":"quit"}   handshake
+//!   {"t":"invite"} {"t":"join"} {"t":"start","seed":u64} {"t":"full"}
+//!   {"t":"ka"} {"t":"quit"}                    handshake + liveness
 //!   {"t":"input","d":u8}                       guest -> host (on direction change)
-//!   {"t":"state", x0,y0,d0,a0, x1,y1,d1,a1, w0,w1, rnd, ph, cd}
+//!   {"t":"state", x0,y0,d0,a0, x1,y1,d1,a1, w0,w1, rnd, ph, cd, mg}
 //!       host -> guest, once per simulation step (grid step ~12Hz) plus a slow
 //!       idle tick outside Play. Guests extend trails locally from the head
-//!       positions; the host owns all collisions. `rnd` bumps reset trails.
+//!       positions; the host owns all collisions. A bump of `rnd` (new round)
+//!       or `mg` (host match reset at any time, e.g. R mid-round) resets trails.
 //! d/dir codes: 0=up 1=right 2=down 3=left. ph: 0=lobby 1=countdown 2=play
 //! 3=round-over 4=match-over.
 
@@ -17,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use super::net::{Handshake, HsEvent, NetHandle, NetRole, Throttle};
+use super::net::{Handshake, HsEvent, Liveness, NetHandle, NetRole, Throttle};
 use super::{draw_mode_menu, CellGrid, Dir, Game};
 use crate::theme::t;
 
@@ -55,6 +57,8 @@ pub(super) enum TronMsg {
     Invite,
     Join,
     Start { seed: u64 },
+    Full,
+    Ka,
     Quit,
     Input { d: u8 },
     State {
@@ -71,6 +75,10 @@ pub(super) enum TronMsg {
         rnd: u32,
         ph: u8,
         cd: f32,
+        /// Match generation: bumped by the host on every match reset, so
+        /// guests detect rematches even when `rnd` does not change.
+        #[serde(default)]
+        mg: u32,
     },
 }
 
@@ -151,6 +159,10 @@ pub(super) struct TronGame {
     my_side: usize,
     last_sent_dir: Option<Dir>,
     idle_throttle: Throttle,
+    /// Bumped on every match reset; broadcast so guests can detect a host
+    /// reset even mid-round (same `round` value).
+    match_gen: u32,
+    liveness: Liveness,
 }
 
 impl TronGame {
@@ -176,6 +188,8 @@ impl TronGame {
             my_side: 0,
             last_sent_dir: None,
             idle_throttle: Throttle::new(IDLE_STATE_HZ),
+            match_gen: 0,
+            liveness: Liveness::new(),
         }
     }
 
@@ -201,11 +215,14 @@ impl TronGame {
     fn reset_match(&mut self) {
         self.wins = [0; 2];
         self.round = 1;
+        self.match_gen = self.match_gen.wrapping_add(1);
         self.banner.clear();
         self.reset_round();
     }
 
     fn begin_online_match(&mut self, _seed: u64) {
+        self.liveness = Liveness::new();
+        self.last_sent_dir = None;
         if self.authority() {
             self.reset_match();
         } else {
@@ -395,6 +412,7 @@ impl TronGame {
             rnd: self.round,
             ph: self.phase.code(),
             cd: self.cd,
+            mg: self.match_gen,
         }
     }
 
@@ -408,7 +426,8 @@ impl TronGame {
     }
 
     /// Guest-side snapshot application: extend trails from head movement,
-    /// reset them when the round index bumps. Host owns all collisions.
+    /// reset them when the round index bumps OR the host's match generation
+    /// changes (rematch mid-round). Host owns all collisions.
     #[allow(clippy::too_many_arguments)]
     fn apply_state(
         &mut self,
@@ -419,10 +438,14 @@ impl TronGame {
         rnd: u32,
         ph: u8,
         cd: f32,
+        mg: u32,
     ) {
-        if rnd != self.round {
-            // new round: rebuild trails from the received heads
+        if rnd != self.round || mg != self.match_gen {
+            // new round or host reset: rebuild trails from the received heads
             self.round = rnd;
+            self.match_gen = mg;
+            // clear the input dedup so the first turn of the round always sends
+            self.last_sent_dir = None;
             self.occupied.clear();
             for side in 0..2 {
                 self.cycles[side] = Cycle::spawn(
@@ -524,9 +547,22 @@ impl TronGame {
 
 impl Game for TronGame {
     fn tick(&mut self, dt: f32) {
+        let hs_ready = self.hs.as_ref().is_some_and(Handshake::is_ready);
         if let Some(hs) = &mut self.hs {
             if let Some(payload) = hs.tick(dt) {
                 self.net.send(GAME, payload);
+            }
+        }
+        // Once locked, both sides prove presence ~1Hz and treat sustained
+        // inbound silence as a dead peer instead of freezing forever.
+        if hs_ready {
+            let (ka_due, timed_out) = self.liveness.tick(dt);
+            if timed_out {
+                self.abort_online("connection lost — opponent gone");
+                return;
+            }
+            if ka_due {
+                self.net.send(GAME, json!({"t": "ka"}));
             }
         }
 
@@ -815,6 +851,10 @@ impl Game for TronGame {
                 self.abort_online("opponent left the grid");
                 return;
             }
+            Some(HsEvent::Full) => {
+                self.abort_online("match is full — that grid already has a rival");
+                return;
+            }
             None => {}
         }
 
@@ -825,6 +865,8 @@ impl Game for TronGame {
         if !is_opponent {
             return;
         }
+        // Any payload from the locked opponent (state, input, ka) proves life.
+        self.liveness.on_inbound();
         match serde_json::from_value::<TronMsg>(payload.clone()) {
             Ok(TronMsg::Input { d }) if self.role == NetRole::Host => {
                 if let Some(dir) = Dir::from_code(d) {
@@ -845,6 +887,7 @@ impl Game for TronGame {
                 rnd,
                 ph,
                 cd,
+                mg,
             }) if self.role == NetRole::Guest => {
                 self.apply_state(
                     [(x0, y0), (x1, y1)],
@@ -854,9 +897,24 @@ impl Game for TronGame {
                     rnd,
                     ph,
                     cd,
+                    mg,
                 );
             }
             _ => {}
+        }
+    }
+
+    fn peer_disconnected(&mut self, from_id: Option<&str>) {
+        let Some(hs) = &self.hs else { return };
+        let ends = match from_id {
+            None => true, // we lost our own connection: no online play possible
+            Some(id) => hs.opponent_id.as_deref() == Some(id),
+        };
+        if ends {
+            self.abort_online(match from_id {
+                None => "disconnected — online match ended",
+                Some(_) => "opponent left the grid",
+            });
         }
     }
 }
@@ -962,6 +1020,8 @@ mod tests {
             TronMsg::Invite,
             TronMsg::Join,
             TronMsg::Start { seed: 3 },
+            TronMsg::Full,
+            TronMsg::Ka,
             TronMsg::Quit,
             TronMsg::Input { d: 2 },
             TronMsg::State {
@@ -978,6 +1038,7 @@ mod tests {
                 rnd: 5,
                 ph: 2,
                 cd: 0.4,
+                mg: 1,
             },
         ];
         for msg in msgs {
@@ -1001,18 +1062,18 @@ mod tests {
         game.begin_online_match(0);
 
         // first snapshot of round 1 resets trails to the heads
-        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0);
+        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0, 1);
         assert_eq!(game.round, 1);
         assert_eq!(game.cycles[0].trail, vec![(14, 15)]);
 
         // next snapshot: heads moved one cell, trails extend locally
-        game.apply_state([(15, 15), (41, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0);
+        game.apply_state([(15, 15), (41, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0, 1);
         assert_eq!(game.cycles[0].trail, vec![(14, 15), (15, 15)]);
         assert_eq!(game.cycles[1].trail, vec![(42, 15), (41, 15)]);
         assert!(game.occupied.contains(&(15, 15)));
 
         // round bump: trails reset to the new heads
-        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [1, 0], 2, 1, 1.5);
+        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [1, 0], 2, 1, 1.5, 1);
         assert_eq!(game.round, 2);
         assert_eq!(game.cycles[0].trail, vec![(14, 15)]);
         assert_eq!(game.wins, [1, 0]);
@@ -1026,10 +1087,120 @@ mod tests {
         game.role = NetRole::Guest;
         game.my_side = 1;
         game.begin_online_match(0);
-        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0);
+        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0, 1);
         // opponent (side 0 = host) crashes; we take the round
-        game.apply_state([(14, 15), (41, 15)], [1, 3], [false, true], [0, 1], 1, 3, 1.8);
+        game.apply_state([(14, 15), (41, 15)], [1, 3], [false, true], [0, 1], 1, 3, 1.8, 1);
         assert_eq!(game.phase, Phase::RoundOver);
         assert!(game.banner.contains("YOU TAKES THE ROUND") || game.banner.contains("YOU"));
+    }
+
+    #[test]
+    fn host_reset_mid_round_resets_guest_arena_via_generation() {
+        let mut game = TronGame::new(NetHandle::new());
+        game.mode = Mode::Online;
+        game.role = NetRole::Guest;
+        game.my_side = 1;
+        game.begin_online_match(0);
+
+        // Round 1 in play: trails have grown away from the spawn points.
+        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0, 1);
+        game.apply_state([(20, 15), (36, 15)], [1, 3], [true, true], [0, 0], 1, 2, 0.0, 1);
+        assert!(game.cycles[0].trail.len() > 1);
+
+        // Host presses R mid-round: rnd is 1 again, but mg bumped. The guest
+        // must rebuild from the spawn heads instead of walking a phantom gap.
+        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 0], 1, 1, 1.5, 2);
+        assert_eq!(game.match_gen, 2);
+        assert_eq!(game.cycles[0].trail, vec![(14, 15)]);
+        assert_eq!(game.cycles[1].trail, vec![(42, 15)]);
+        assert_eq!(
+            game.occupied,
+            HashSet::from([(14, 15), (42, 15)]),
+            "no phantom trail cells survive a host reset"
+        );
+        assert_eq!(game.phase, Phase::Countdown);
+    }
+
+    #[test]
+    fn stale_guest_dir_resends_after_round_transition() {
+        let handle = NetHandle::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        handle.configure(Some(tx), Some("me".to_string()));
+        let mut game = TronGame::new(handle);
+        game.mode = Mode::Online;
+        game.role = NetRole::Guest;
+        game.my_side = 1;
+        game.begin_online_match(0);
+
+        game.send_guest_dir(Dir::Up);
+        assert!(rx.try_recv().is_ok(), "first press sends the input");
+        game.send_guest_dir(Dir::Up);
+        assert!(rx.try_recv().is_err(), "duplicate press is deduped");
+
+        // Round transition: the dedup must reset so the same direction can be
+        // requested again in the new round.
+        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 1], 2, 1, 1.5, 1);
+        game.send_guest_dir(Dir::Up);
+        let (_, payload) = rx.try_recv().expect("same dir sends again after a new round");
+        assert_eq!(payload, serde_json::json!({"t": "input", "d": 0}));
+
+        // Same after a rematch (generation bump, round unchanged).
+        game.send_guest_dir(Dir::Up);
+        assert!(rx.try_recv().is_err());
+        game.apply_state([(14, 15), (42, 15)], [1, 3], [true, true], [0, 0], 2, 1, 1.5, 2);
+        game.send_guest_dir(Dir::Up);
+        assert!(rx.try_recv().is_ok(), "same dir sends again after a rematch");
+    }
+
+    #[test]
+    fn ready_host_times_out_when_guest_goes_silent() {
+        let mut game = TronGame::new(NetHandle::new());
+        game.mode = Mode::Online;
+        game.role = NetRole::Host;
+        game.my_side = 0;
+        let (mut hs, _) = Handshake::host(1);
+        hs.on_net("guest-id", "K7", &json!({"t": "join"}));
+        game.hs = Some(hs);
+        game.begin_online_match(1);
+
+        // Guest keepalives keep the match alive.
+        for _ in 0..80 {
+            game.tick(0.05); // 4s
+        }
+        game.handle_net("guest-id", "K7", &json!({"t": "ka"}));
+        for _ in 0..80 {
+            game.tick(0.05);
+        }
+        assert_ne!(game.phase, Phase::Menu, "keepalive resets the silence clock");
+
+        // Guest process dies (no quit): host must not simulate forever.
+        for _ in 0..30 {
+            game.tick(0.05); // past the 5s threshold
+        }
+        assert_eq!(game.phase, Phase::Menu);
+        assert!(game.hs.is_none());
+        assert!(game
+            .menu_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("connection lost"));
+    }
+
+    #[test]
+    fn peer_disconnected_ends_online_session() {
+        let mut game = TronGame::new(NetHandle::new());
+        game.mode = Mode::Online;
+        game.role = NetRole::Guest;
+        game.my_side = 1;
+        let (mut hs, _) = Handshake::guest();
+        hs.on_net("host-id", "HOSTY", &json!({"t": "start", "seed": 5}));
+        game.hs = Some(hs);
+        game.begin_online_match(5);
+
+        game.peer_disconnected(Some("bystander"));
+        assert_ne!(game.phase, Phase::Menu);
+        game.peer_disconnected(None);
+        assert_eq!(game.phase, Phase::Menu);
+        assert!(game.hs.is_none());
     }
 }

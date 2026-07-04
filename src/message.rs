@@ -41,6 +41,12 @@ pub struct WsAsciiFrame {
     pub data: Vec<u32>,
 }
 
+/// Hard caps on relayed video frames. Anything larger is hostile or corrupt
+/// -- a ~60-byte JSON message claiming 65535x65535 would otherwise make every
+/// receiver allocate gigabytes (see review finding #3).
+pub const MAX_FRAME_WIDTH: u16 = 400;
+pub const MAX_FRAME_HEIGHT: u16 = 200;
+
 #[allow(dead_code)]
 impl WsAsciiFrame {
     pub fn new(width: u16, height: u16) -> Self {
@@ -49,6 +55,18 @@ impl WsAsciiFrame {
             height,
             data: vec![0; width as usize * height as usize * 4],
         }
+    }
+
+    /// True when the claimed dimensions are within the hard caps AND the data
+    /// buffer length matches them exactly (4 words per cell). Both the server
+    /// (before relaying) and the client (before decoding) must check this so
+    /// a hostile participant can never force a huge allocation on peers.
+    /// The dimension caps are checked first so the multiplication below can
+    /// never overflow.
+    pub fn is_well_formed(&self) -> bool {
+        self.width <= MAX_FRAME_WIDTH
+            && self.height <= MAX_FRAME_HEIGHT
+            && self.data.len() == self.width as usize * self.height as usize * 4
     }
 
     pub fn set_cell(&mut self, x: u16, y: u16, ch: char, r: u8, g: u8, b: u8) {
@@ -152,6 +170,43 @@ mod tests {
         let json = serde_json::to_string(&frame).unwrap();
         let back: WsAsciiFrame = serde_json::from_str(&json).unwrap();
         assert_eq!(back.get_cell(0, 0), Some(('▀', 255, 10, 20)));
+    }
+
+    #[test]
+    fn frame_validation_rejects_hostile_and_mismatched_frames() {
+        // a normal constructed frame is well-formed
+        assert!(WsAsciiFrame::new(2, 2).is_well_formed());
+        assert!(WsAsciiFrame::new(0, 0).is_well_formed());
+        // the largest allowed frame is well-formed
+        assert!(WsAsciiFrame::new(MAX_FRAME_WIDTH, MAX_FRAME_HEIGHT).is_well_formed());
+
+        // hostile dims with a tiny buffer (the finding-#3 attack message)
+        let hostile = WsAsciiFrame {
+            width: 65535,
+            height: 65535,
+            data: vec![],
+        };
+        assert!(!hostile.is_well_formed());
+
+        // one past either cap is rejected even with a consistent buffer
+        let too_wide = WsAsciiFrame::new(MAX_FRAME_WIDTH + 1, 1);
+        assert!(!too_wide.is_well_formed());
+        let too_tall = WsAsciiFrame::new(1, MAX_FRAME_HEIGHT + 1);
+        assert!(!too_tall.is_well_formed());
+
+        // data length must match exactly: short and long both rejected
+        let short = WsAsciiFrame {
+            width: 2,
+            height: 1,
+            data: vec![0; 4], // one cell of data for two cells
+        };
+        assert!(!short.is_well_formed());
+        let long = WsAsciiFrame {
+            width: 2,
+            height: 1,
+            data: vec![0; 12],
+        };
+        assert!(!long.is_well_formed());
     }
 
     #[test]
