@@ -1117,8 +1117,8 @@ impl App {
                     match VideoPlayer::new(source.clone(), video::DECODE_BOX, false) {
                         Ok(player) => {
                             self.video = Some(player);
-                            self.start_audio(source, false);
                             self.video_enabled = true;
+                            self.start_audio(source, false);
                             self.video_source_label = title.clone();
                             self.tiling.set_focused_panel(PanelKind::Video);
                             self.add_system_message(format!("youtube stream locked: {}", title));
@@ -1413,6 +1413,7 @@ impl App {
             }
             KeyCode::F(3) => {
                 self.video_enabled = !self.video_enabled;
+                self.apply_audio_state();
                 self.status_note = if self.video_enabled {
                     "video bus online".to_string()
                 } else {
@@ -1711,6 +1712,7 @@ impl App {
             }
             CommandId::Video => {
                 self.video_enabled = !self.video_enabled;
+                self.apply_audio_state();
                 self.status_note = if self.video_enabled {
                     "video bus online".to_string()
                 } else {
@@ -2379,8 +2381,15 @@ impl App {
             return;
         }
         self.audio = AudioPlayer::new(source, looping).ok();
+        self.apply_audio_state();
+    }
+
+    /// Keep audio in sync with the video panel + mute preference: sound plays
+    /// only when the video panel is enabled AND not muted, so toggling the panel
+    /// off (F3 / /video) never leaves audio playing over paused video.
+    fn apply_audio_state(&self) {
         if let Some(a) = &self.audio {
-            a.set_muted(self.audio_muted);
+            a.set_muted(self.audio_muted || !self.video_enabled);
         }
     }
 
@@ -2413,6 +2422,11 @@ impl App {
         };
         let http_port = ws_port.checked_add(1).unwrap_or(ws_port - 1);
         let inject_ws = format!("ws://{}:{}", host, ws_port);
+        // if a studio is already running for a DIFFERENT room, retire it so the
+        // page never dials a stale hub
+        if matches!(&self.studio, Some(s) if s.ws() != inject_ws) {
+            self.studio = None; // Drop stops the old accept loop
+        }
         if self.studio.is_none() {
             match studio::StudioServer::start(http_port, &inject_ws) {
                 Ok(s) => self.studio = Some(s),
@@ -2435,9 +2449,7 @@ impl App {
     /// Toggle audio mute (persists across video reloads + loops).
     fn toggle_mute(&mut self) {
         self.audio_muted = !self.audio_muted;
-        if let Some(a) = &self.audio {
-            a.set_muted(self.audio_muted);
-        }
+        self.apply_audio_state();
         self.status_note = if self.audio_muted {
             "audio muted".to_string()
         } else if self.audio.is_some() {

@@ -25,6 +25,10 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 /// laptop, dropped WiFi -- no TCP FIN ever arrives) and is cleaned up exactly
 /// like a disconnect. Mirrors the client-side 60s silence detector.
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Max serialized size of a relayed WebRTC signaling payload. SDP + ICE are a
+/// few KB; anything larger is dropped so Signal can't be a memory-amplification
+/// vector aimed at one peer.
+const MAX_SIGNAL_BYTES: usize = 64 * 1024;
 
 struct ConnHandle {
     tx: mpsc::UnboundedSender<WsMessage>,
@@ -232,8 +236,11 @@ impl VideoChatServer {
                                     }
                                     WsMessage::Signal { to, payload, .. } => {
                                         // WebRTC signaling: authoritative sender,
-                                        // delivered ONLY to the named target peer
-                                        if let Some(ref uid) = user_id {
+                                        // delivered ONLY to the named target peer.
+                                        // Oversized payloads are dropped, not relayed.
+                                        let too_big = serde_json::to_string(&payload)
+                                            .map_or(true, |s| s.len() > MAX_SIGNAL_BYTES);
+                                        if let (Some(ref uid), false) = (&user_id, too_big) {
                                             self.send_to(
                                                 &to,
                                                 &WsMessage::Signal {
@@ -333,8 +340,12 @@ impl VideoChatServer {
     fn send_to(&self, target: &str, msg: &WsMessage) {
         let conns = self.connections.read();
         if let Some(handle) = conns.get(target) {
+            // Unicast signaling is routed into the TARGET's control budget, so a
+            // third party's Signal flood must NOT be able to evict the target
+            // (unlike broadcast control, which kills a peer's OWN slowness). When
+            // the target's queue is full we simply DROP the signal — a dropped
+            // ICE/SDP just retries; it can never kick an innocent peer offline.
             if handle.pending_control.load(Ordering::Relaxed) >= self.max_pending_control {
-                handle.kill.notify_one();
                 return;
             }
             handle.pending_control.fetch_add(1, Ordering::Relaxed);
@@ -426,6 +437,66 @@ mod tests {
             username: String::new(),
             frame,
         }
+    }
+
+    async fn welcome_id<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> String
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            let msg = ws.next().await.unwrap().unwrap();
+            if let TungsteniteMsg::Text(t) = msg {
+                if let Ok(WsMessage::Welcome { user_id }) = serde_json::from_str::<WsMessage>(&t) {
+                    return user_id;
+                }
+            }
+        }
+    }
+
+    /// WebRTC signaling relay must rewrite `from` to the authenticated sender
+    /// (no spoofing) and deliver ONLY to the named target. (The send_to path also
+    /// drops rather than kills a backed-up target, so a Signal flood can't evict
+    /// an innocent peer -- see the send_to hardening.)
+    #[tokio::test]
+    async fn signal_relay_rewrites_sender_and_unicasts_to_target() {
+        let (_server, url) = spawn(VideoChatServer::new());
+
+        let (mut victim, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        victim.send(join_text("victim")).await.unwrap();
+        let victim_id = welcome_id(&mut victim).await;
+
+        let (mut sender, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        sender.send(join_text("sender")).await.unwrap();
+        let sender_id = welcome_id(&mut sender).await;
+
+        // sender signals the victim while trying to spoof `from`
+        let sig = WsMessage::Signal {
+            from: "SPOOFED".to_string(),
+            to: victim_id.clone(),
+            payload: serde_json::json!({"kind": "offer", "sdp": "v=0"}),
+        };
+        sender
+            .send(TungsteniteMsg::Text(serde_json::to_string(&sig).unwrap()))
+            .await
+            .unwrap();
+
+        let (from, payload) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = victim.next().await.unwrap().unwrap();
+                if let TungsteniteMsg::Text(t) = msg {
+                    if let Ok(WsMessage::Signal { from, payload, .. }) =
+                        serde_json::from_str::<WsMessage>(&t)
+                    {
+                        return (from, payload);
+                    }
+                }
+            }
+        })
+        .await
+        .expect("victim receives the relayed signal");
+
+        assert_eq!(from, sender_id, "from must be the authenticated sender, not spoofed");
+        assert_eq!(payload["kind"], "offer");
     }
 
     /// An outdated (v1) client must be rejected with a friendly Ack and a

@@ -147,7 +147,7 @@ function handle(m) {
     case "Welcome": myId = d.user_id; el("room").textContent = `you are ${USERNAME}`; setStatus("connected"); break;
     case "UserList": updateRoster(d); reconcilePeers(d); break;
     case "UserJoined": sysChat(`${d.username} joined`); break;
-    case "UserLeft": sysChat(`${d.username} left`); dropPeer(d.user_id); break;
+    case "UserLeft": sysChat(`${d.username} left`); dropPeer(d.user_id); deadPeers.delete(d.user_id); break;
     case "Chat": addChat(d.username, d.content); break;
     case "Signal": onSignal(d); break;
     default: break; // Frame (terminal ASCII), Ping/Pong, etc. — ignored
@@ -162,11 +162,12 @@ function updateRoster(list) {
 }
 
 // ================= WebRTC mesh (polite: lower id initiates) =================
+const deadPeers = new Set(); // ids that never established WebRTC (e.g. terminal peers) — don't keep retrying
 function reconcilePeers(list) {
   if (!myId) return;
   const ids = new Set(list.map(u => u.user_id));
   for (const u of list) {
-    if (u.user_id === myId || peers.has(u.user_id)) continue;
+    if (u.user_id === myId || peers.has(u.user_id) || deadPeers.has(u.user_id)) continue;
     createPeer(u.user_id, u.username);
   }
   for (const id of [...peers.keys()]) if (!ids.has(id)) dropPeer(id);
@@ -187,6 +188,11 @@ function createPeer(id, name) {
     catch (e) { console.warn("negotiate", e); }
     finally { rec.makingOffer = false; }
   };
+  // reap peers that never connect: terminal peers have no WebRTC and never
+  // answer, so drop the pc after a grace period and stop retrying it
+  setTimeout(() => {
+    if (peers.get(id) === rec && pc.connectionState !== "connected") { deadPeers.add(id); dropPeer(id); }
+  }, 12000);
   return rec;
 }
 

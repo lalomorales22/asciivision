@@ -10,11 +10,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 
 const STUDIO_HTML: &str = include_str!("studio.html");
+/// Cap on concurrent HTTP connections so a connection flood / slow-loris can't
+/// pile up detached tasks or exhaust file descriptors on the host.
+const MAX_STUDIO_CONNS: usize = 64;
+/// Per-connection read/write budget; a client that never sends or never reads
+/// can't park a task (and its connection slot) indefinitely.
+const CONN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct StudioServer {
     port: u16,
+    ws: String,
     stop: Arc<AtomicBool>,
 }
 
@@ -37,6 +45,8 @@ impl StudioServer {
                 .into_boxed_slice(),
         );
 
+        let sem = Arc::new(Semaphore::new(MAX_STUDIO_CONNS));
+
         tokio::spawn(async move {
             let listener = match TcpListener::from_std(std_listener) {
                 Ok(l) => l,
@@ -48,19 +58,35 @@ impl StudioServer {
                         if stop_loop.load(Ordering::Relaxed) { break; }
                     }
                     accepted = listener.accept() => {
-                        let (mut sock, _) = match accepted { Ok(s) => s, Err(_) => continue };
+                        let (mut sock, _) = match accepted {
+                            Ok(s) => s,
+                            // back off on accept errors (e.g. EMFILE) instead of
+                            // busy-spinning the loop at 100% CPU
+                            Err(_) => { tokio::time::sleep(Duration::from_millis(50)).await; continue; }
+                        };
+                        // bound concurrency: at capacity, drop the new socket
+                        // immediately (closing it) rather than spawning a task
+                        let permit = match Arc::clone(&sem).try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
                         let page = page.clone();
                         tokio::spawn(async move {
-                            // drain the request (we serve the same page for any GET)
+                            let _permit = permit; // released when this task ends
                             let mut scratch = [0u8; 2048];
-                            let _ = sock.read(&mut scratch).await;
+                            // drain the request (we serve the same page for any GET);
+                            // timeout so a silent client can't hold the slot forever
+                            let _ = tokio::time::timeout(CONN_TIMEOUT, sock.read(&mut scratch)).await;
                             let header = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
                                 page.len()
                             );
-                            let _ = sock.write_all(header.as_bytes()).await;
-                            let _ = sock.write_all(&page).await;
-                            let _ = sock.flush().await;
+                            let _ = tokio::time::timeout(CONN_TIMEOUT, async {
+                                let _ = sock.write_all(header.as_bytes()).await;
+                                let _ = sock.write_all(&page).await;
+                                let _ = sock.flush().await;
+                            })
+                            .await;
                         });
                     }
                 }
@@ -69,12 +95,18 @@ impl StudioServer {
 
         Ok(Self {
             port: bound_port,
+            ws: ws_url.to_string(),
             stop,
         })
     }
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The signaling hub URL this server baked into the page.
+    pub fn ws(&self) -> &str {
+        &self.ws
     }
 }
 
