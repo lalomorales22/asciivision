@@ -519,7 +519,11 @@ impl VideoChatClient {
                     .push(("SYSTEM".to_string(), format!("{} left", username)));
                 self.fire(NetEvent::UserLeft { user_id, username });
             }
-            WsMessage::Ping | WsMessage::Pong | WsMessage::Join { .. } => {}
+            // terminal clients don't do WebRTC; signaling is browser-only
+            WsMessage::Signal { .. }
+            | WsMessage::Ping
+            | WsMessage::Pong
+            | WsMessage::Join { .. } => {}
         }
     }
 }

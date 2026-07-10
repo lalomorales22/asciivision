@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ASCIIVision Studio</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #05070d; color: #cfe6ff;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow: hidden; }
+  #bg { position: fixed; inset: 0; z-index: 0; }
+  #app { position: relative; z-index: 1; height: 100%; display: grid;
+    grid-template-rows: auto 1fr auto; gap: 10px; padding: 12px; }
+  header { display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 15px; letter-spacing: .28em; margin: 0; color: #7fe7c4;
+    text-shadow: 0 0 12px rgba(127,231,196,.5); }
+  header .status { font-size: 12px; color: #8aa0c0; }
+  .grow { flex: 1; }
+  .pill { font-size: 11px; padding: 4px 9px; border: 1px solid #24405f; border-radius: 999px;
+    background: rgba(10,20,34,.6); color: #9fd0ff; }
+  main { display: grid; grid-template-columns: 1fr 300px; gap: 10px; min-height: 0; }
+  #stage { display: grid; gap: 10px; min-height: 0;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-content: start; overflow: auto; }
+  .tile { position: relative; aspect-ratio: 4/3; background: #080d16; border: 1px solid #1d3350;
+    border-radius: 12px; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .tile video, .tile canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile .label { position: absolute; left: 8px; bottom: 6px; font-size: 11px; padding: 2px 8px;
+    background: rgba(4,8,14,.7); border-radius: 8px; color: #bfe0ff; }
+  .tile.self { border-color: #2f6b57; }
+  aside { display: grid; grid-template-rows: auto 1fr auto; gap: 8px; min-height: 0;
+    background: rgba(8,13,22,.55); border: 1px solid #14263c; border-radius: 12px; padding: 10px; }
+  aside h2 { font-size: 11px; letter-spacing: .2em; color: #6f8cae; margin: 4px 2px; text-transform: uppercase; }
+  #roster { font-size: 12px; line-height: 1.7; color: #a9c6e6; }
+  #roster .me { color: #7fe7c4; }
+  #chat { overflow: auto; font-size: 12.5px; line-height: 1.5; min-height: 0; }
+  #chat .m { margin: 3px 0; }
+  #chat .u { color: #7fb2ff; } #chat .sys { color: #6b7f98; font-style: italic; }
+  .chatbar { display: flex; gap: 6px; }
+  input[type=text] { flex: 1; background: #0a1220; border: 1px solid #1d3350; color: #dbeeff;
+    padding: 8px 10px; border-radius: 8px; font: inherit; font-size: 12.5px; }
+  footer { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { background: #0e1a2c; color: #cfe6ff; border: 1px solid #244468; padding: 9px 13px;
+    border-radius: 9px; font: inherit; font-size: 12.5px; cursor: pointer; transition: .15s; }
+  button:hover { border-color: #3f7bb5; background: #12233a; }
+  button.on { background: #123a2f; border-color: #2f8f6f; color: #9df0cf; }
+  button.warn { border-color: #6b2f3f; }
+  .hint { font-size: 11px; color: #6b7f98; }
+</style>
+</head>
+<body>
+<canvas id="bg"></canvas>
+<div id="app">
+  <header>
+    <h1>ASCIIVISION&nbsp;STUDIO</h1>
+    <span class="pill" id="room">connecting…</span>
+    <span class="status" id="status"></span>
+    <span class="grow"></span>
+    <span class="pill" id="peers">0 peers</span>
+  </header>
+  <main>
+    <div id="stage"></div>
+    <aside>
+      <div>
+        <h2>In the room</h2>
+        <div id="roster"></div>
+      </div>
+      <div style="min-height:0; display:grid; grid-template-rows:auto 1fr; gap:6px;">
+        <h2>Chat</h2>
+        <div id="chat"></div>
+      </div>
+      <div class="chatbar">
+        <input id="chatInput" type="text" placeholder="message the room…" autocomplete="off" />
+        <button id="sendBtn">send</button>
+      </div>
+    </aside>
+  </main>
+  <footer>
+    <button id="camBtn">🎥 start camera</button>
+    <button id="shareBtn">🖥️ share screen</button>
+    <button id="hatBtn">🎩 hats: off</button>
+    <span class="hint">Hats are face-tracked and composited into your outgoing video, so peers see them too.</span>
+  </footer>
+</div>
+
+<script type="module">
+// ---- config injected by the Rust server ----
+const WS_PORT = "__WS_PORT__";
+const WS_URL = `ws://${location.hostname}:${WS_PORT}`;
+const PROTOCOL_VERSION = 3;
+const USERNAME = "studio-" + Math.floor(1000 + Math.random() * 9000);
+const ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+const el = (id) => document.getElementById(id);
+const stage = el("stage"), roster = el("roster"), chat = el("chat");
+const setStatus = (s) => (el("status").textContent = s);
+
+// ================= three.js starfield background =================
+import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+(function bg() {
+  const canvas = el("bg");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 100);
+  cam.position.z = 6;
+  const geo = new THREE.BufferGeometry();
+  const N = 1400, pos = new Float32Array(N * 3);
+  for (let i = 0; i < N * 3; i++) pos[i] = (Math.random() - 0.5) * 30;
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const stars = new THREE.Points(geo, new THREE.PointsMaterial({ color: 0x39d0ff, size: 0.05 }));
+  scene.add(stars);
+  const knot = new THREE.Mesh(
+    new THREE.TorusKnotGeometry(1.5, 0.35, 160, 24),
+    new THREE.MeshBasicMaterial({ color: 0x1f9e7a, wireframe: true, transparent: true, opacity: 0.25 })
+  );
+  scene.add(knot);
+  function resize() { renderer.setSize(innerWidth, innerHeight); cam.aspect = innerWidth / innerHeight; cam.updateProjectionMatrix(); }
+  addEventListener("resize", resize); resize();
+  (function loop(t) {
+    knot.rotation.x = t * 0.0002; knot.rotation.y = t * 0.00035;
+    stars.rotation.y = t * 0.00005;
+    renderer.render(scene, cam); requestAnimationFrame(loop);
+  })(0);
+})();
+
+// ================= signaling / room state =================
+let ws, myId = null;
+const peers = new Map();  // id -> { pc, name, tile, video }
+let localStream = null;   // the composited (hat) stream we send + preview
+let camStream = null;     // raw camera
+let screenStream = null;
+
+function wsSend(type, data) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type, data })); }
+function signal(to, payload) { wsSend("Signal", { from: myId || "", to, payload }); }
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => { setStatus("joining…"); wsSend("Join", { username: USERNAME, version: PROTOCOL_VERSION }); };
+  ws.onclose = () => { setStatus("disconnected — retrying"); el("room").textContent = "offline"; setTimeout(connect, 1500); };
+  ws.onerror = () => setStatus("connection error");
+  ws.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch { return; } handle(m); };
+}
+
+function handle(m) {
+  const d = m.data;
+  switch (m.type) {
+    case "Welcome": myId = d.user_id; el("room").textContent = `you are ${USERNAME}`; setStatus("connected"); break;
+    case "UserList": updateRoster(d); reconcilePeers(d); break;
+    case "UserJoined": sysChat(`${d.username} joined`); break;
+    case "UserLeft": sysChat(`${d.username} left`); dropPeer(d.user_id); break;
+    case "Chat": addChat(d.username, d.content); break;
+    case "Signal": onSignal(d); break;
+    default: break; // Frame (terminal ASCII), Ping/Pong, etc. — ignored
+  }
+}
+
+function updateRoster(list) {
+  el("peers").textContent = `${Math.max(0, list.length)} in room`;
+  roster.innerHTML = list.map(u =>
+    `<div class="${u.user_id === myId ? "me" : ""}">• ${escape(u.username)}${u.user_id === myId ? " (you)" : ""}</div>`
+  ).join("");
+}
+
+// ================= WebRTC mesh (polite: lower id initiates) =================
+function reconcilePeers(list) {
+  if (!myId) return;
+  const ids = new Set(list.map(u => u.user_id));
+  for (const u of list) {
+    if (u.user_id === myId || peers.has(u.user_id)) continue;
+    createPeer(u.user_id, u.username);
+  }
+  for (const id of [...peers.keys()]) if (!ids.has(id)) dropPeer(id);
+}
+
+// Perfect negotiation: the peer with the higher id is "polite" and yields on
+// glare. BOTH sides renegotiate via onnegotiationneeded, so either can add its
+// camera/screen tracks at any time and the other still receives them.
+function createPeer(id, name) {
+  const pc = new RTCPeerConnection(ICE);
+  const rec = { pc, name, tile: null, video: null, polite: myId > id, makingOffer: false, ignoreOffer: false };
+  peers.set(id, rec);
+  if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  pc.onicecandidate = (e) => { if (e.candidate) signal(id, { kind: "ice", candidate: e.candidate }); };
+  pc.ontrack = (e) => ensureRemoteTile(id, name, e.streams[0]);
+  pc.onnegotiationneeded = async () => {
+    try { rec.makingOffer = true; await pc.setLocalDescription(); signal(id, { kind: "sdp", sdp: pc.localDescription }); }
+    catch (e) { console.warn("negotiate", e); }
+    finally { rec.makingOffer = false; }
+  };
+  return rec;
+}
+
+async function onSignal(d) {
+  const rec = peers.get(d.from) || createPeer(d.from, d.from);
+  const pc = rec.pc, p = d.payload || {};
+  try {
+    if (p.kind === "sdp") {
+      const desc = p.sdp;
+      const collision = desc.type === "offer" && (rec.makingOffer || pc.signalingState !== "stable");
+      rec.ignoreOffer = !rec.polite && collision;
+      if (rec.ignoreOffer) return;
+      await pc.setRemoteDescription(desc);
+      if (desc.type === "offer") { await pc.setLocalDescription(); signal(d.from, { kind: "sdp", sdp: pc.localDescription }); }
+    } else if (p.kind === "ice") {
+      try { await pc.addIceCandidate(p.candidate); } catch (e) { if (!rec.ignoreOffer) console.warn("ice", e); }
+    }
+  } catch (e) { console.warn("signal", e); }
+}
+
+function dropPeer(id) {
+  const rec = peers.get(id); if (!rec) return;
+  try { rec.pc.close(); } catch {}
+  if (rec.tile) rec.tile.remove();
+  peers.delete(id);
+}
+
+function ensureRemoteTile(id, name, stream) {
+  let rec = peers.get(id); if (!rec) return;
+  if (!rec.tile) {
+    const t = document.createElement("div"); t.className = "tile";
+    const v = document.createElement("video"); v.autoplay = true; v.playsInline = true;
+    const l = document.createElement("div"); l.className = "label"; l.textContent = name;
+    t.append(v, l); stage.append(t); rec.tile = t; rec.video = v;
+  }
+  rec.video.srcObject = stream;
+}
+
+// ================= local media + AR hats compositor =================
+const HATS = ["🎩", "🧢", "👑", "🎉", "🤠", "🎓"];
+let hatOn = false, hatIdx = 0, faceLandmarker = null;
+const hidden = document.createElement("video"); hidden.muted = true; hidden.playsInline = true;
+const comp = document.createElement("canvas"); comp.width = 640; comp.height = 480;
+const cctx = comp.getContext("2d");
+
+async function startCamera() {
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: true });
+  } catch (e) { setStatus("camera denied"); return; }
+  hidden.srcObject = camStream; await hidden.play().catch(() => {});
+  // composited stream (video + optional hat) becomes what we send + preview
+  localStream = comp.captureStream(30);
+  // carry the mic track through untouched
+  camStream.getAudioTracks().forEach(a => localStream.addTrack(a));
+  showSelfTile();
+  drawLoop();
+  // (re)negotiate with existing peers now that we have media
+  for (const [id, rec] of peers) {
+    localStream.getTracks().forEach(t => { if (!rec.pc.getSenders().find(s => s.track === t)) rec.pc.addTrack(t, localStream); });
+  }
+  el("camBtn").textContent = "🎥 camera on"; el("camBtn").classList.add("on");
+  initFace();
+}
+
+function showSelfTile() {
+  let t = document.getElementById("selfTile");
+  if (!t) {
+    t = document.createElement("div"); t.className = "tile self"; t.id = "selfTile";
+    const v = document.createElement("video"); v.autoplay = true; v.muted = true; v.playsInline = true; v.id = "selfVid";
+    const l = document.createElement("div"); l.className = "label"; l.textContent = USERNAME + " (you)";
+    t.append(v, l); stage.prepend(t);
+  }
+  document.getElementById("selfVid").srcObject = localStream;
+}
+
+function drawLoop() {
+  const src = screenStream ? screenVideo : hidden;
+  if (src && src.videoWidth) {
+    // cover-fit into the 640x480 canvas
+    const cw = comp.width, ch = comp.height, iw = src.videoWidth, ih = src.videoHeight;
+    const s = Math.max(cw / iw, ch / ih), w = iw * s, h = ih * s;
+    cctx.drawImage(src, (cw - w) / 2, (ch - h) / 2, w, h);
+    if (hatOn && !screenStream && faceLandmarker) drawHat();
+  }
+  requestAnimationFrame(drawLoop);
+}
+
+function drawHat() {
+  let res;
+  try { res = faceLandmarker.detectForVideo(hidden, performance.now()); } catch { return; }
+  const lm = res && res.faceLandmarks && res.faceLandmarks[0];
+  if (!lm) return;
+  // landmarks are normalized [0..1]; 10=forehead top, 234=left cheek, 454=right cheek
+  const cw = comp.width, ch = comp.height;
+  const top = lm[10], l = lm[234], r = lm[454];
+  const faceW = Math.hypot((r.x - l.x) * cw, (r.y - l.y) * ch) * 1.9;
+  const cx = top.x * cw, cy = top.y * ch;
+  const size = Math.max(30, faceW);
+  cctx.font = `${size}px serif`;
+  cctx.textAlign = "center"; cctx.textBaseline = "bottom";
+  cctx.fillText(HATS[hatIdx], cx, cy + size * 0.30);
+}
+
+async function initFace() {
+  if (faceLandmarker) return;
+  try {
+    const vision = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+    const files = await vision.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    faceLandmarker = await vision.FaceLandmarker.createFromOptions(files, {
+      baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" },
+      runningMode: "VIDEO", numFaces: 1,
+    });
+  } catch (e) { console.warn("face model", e); setStatus("hats need internet (MediaPipe)"); }
+}
+
+// ================= screen share =================
+let screenVideo = null;
+async function toggleShare() {
+  if (screenStream) {
+    screenStream.getTracks().forEach(t => t.stop()); screenStream = null; screenVideo = null;
+    el("shareBtn").textContent = "🖥️ share screen"; el("shareBtn").classList.remove("on");
+    return;
+  }
+  try { screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true }); }
+  catch { return; }
+  screenVideo = document.createElement("video"); screenVideo.muted = true; screenVideo.playsInline = true;
+  screenVideo.srcObject = screenStream; await screenVideo.play().catch(() => {});
+  screenStream.getVideoTracks()[0].addEventListener("ended", () => { screenStream = null; screenVideo = null; el("shareBtn").textContent = "🖥️ share screen"; el("shareBtn").classList.remove("on"); });
+  el("shareBtn").textContent = "🖥️ sharing"; el("shareBtn").classList.add("on");
+  if (!localStream) { // if no camera yet, start compositor from the screen
+    localStream = comp.captureStream(30); showSelfTile(); drawLoop();
+    for (const [, rec] of peers) localStream.getVideoTracks().forEach(t => rec.pc.addTrack(t, localStream));
+  }
+}
+
+// ================= chat =================
+function addChat(user, content) { const d = document.createElement("div"); d.className = "m"; d.innerHTML = `<span class="u">${escape(user)}:</span> ${escape(content)}`; chat.append(d); chat.scrollTop = chat.scrollHeight; }
+function sysChat(t) { const d = document.createElement("div"); d.className = "m sys"; d.textContent = t; chat.append(d); chat.scrollTop = chat.scrollHeight; }
+function sendChat() { const v = el("chatInput").value.trim(); if (!v) return; wsSend("Chat", { user_id: myId || "", username: USERNAME, content: v }); addChat(USERNAME, v); el("chatInput").value = ""; }
+function escape(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ================= wiring =================
+el("camBtn").onclick = () => { if (!localStream) startCamera(); };
+el("shareBtn").onclick = toggleShare;
+el("hatBtn").onclick = () => {
+  if (!hatOn) { hatOn = true; } else { hatIdx = (hatIdx + 1) % HATS.length; if (hatIdx === 0) hatOn = false; }
+  el("hatBtn").textContent = hatOn ? `${HATS[hatIdx]} hats: on (tap to change)` : "🎩 hats: off";
+  el("hatBtn").classList.toggle("on", hatOn);
+};
+el("sendBtn").onclick = sendChat;
+el("chatInput").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
+
+connect();
+</script>
+</body>
+</html>

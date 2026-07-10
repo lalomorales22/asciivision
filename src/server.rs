@@ -230,6 +230,20 @@ impl VideoChatServer {
                                             );
                                         }
                                     }
+                                    WsMessage::Signal { to, payload, .. } => {
+                                        // WebRTC signaling: authoritative sender,
+                                        // delivered ONLY to the named target peer
+                                        if let Some(ref uid) = user_id {
+                                            self.send_to(
+                                                &to,
+                                                &WsMessage::Signal {
+                                                    from: uid.clone(),
+                                                    to: to.clone(),
+                                                    payload,
+                                                },
+                                            );
+                                        }
+                                    }
                                     WsMessage::Ping => {
                                         let _ = ws_tx
                                             .send(TungsteniteMsg::Text(serde_json::to_string(&WsMessage::Pong)?))
@@ -311,6 +325,23 @@ impl VideoChatServer {
 
     fn broadcast_all(&self, msg: &WsMessage) {
         self.broadcast_except(msg, None);
+    }
+
+    /// Deliver a message to exactly ONE peer (WebRTC signaling). Treated like
+    /// control traffic: never silently dropped, but a wedged consumer whose
+    /// queue overflows is killed rather than growing it without bound.
+    fn send_to(&self, target: &str, msg: &WsMessage) {
+        let conns = self.connections.read();
+        if let Some(handle) = conns.get(target) {
+            if handle.pending_control.load(Ordering::Relaxed) >= self.max_pending_control {
+                handle.kill.notify_one();
+                return;
+            }
+            handle.pending_control.fetch_add(1, Ordering::Relaxed);
+            if handle.tx.send(msg.clone()).is_err() {
+                handle.pending_control.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
     }
 
     fn broadcast_except(&self, msg: &WsMessage, except: Option<&str>) {

@@ -106,11 +106,16 @@ where
         config.clone(),
         move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
             let gain = if muted.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
-            let n = out.len().min(scratch.len());
-            let got = cons.pop_slice(&mut scratch[..n]);
-            for (i, slot) in out.iter_mut().enumerate() {
-                let v = if i < got { scratch[i] * gain } else { 0.0 };
-                *slot = T::from_sample(v);
+            // fill the WHOLE output in scratch-sized chunks so a device buffer
+            // larger than `scratch` never gets a silent tail
+            let mut i = 0;
+            while i < out.len() {
+                let chunk = (out.len() - i).min(scratch.len());
+                let got = cons.pop_slice(&mut scratch[..chunk]);
+                for k in 0..chunk {
+                    out[i + k] = T::from_sample(if k < got { scratch[k] * gain } else { 0.0 });
+                }
+                i += chunk;
             }
         },
         move |_err| {},
@@ -174,7 +179,7 @@ fn decode_loop(
         })?;
 
         let mut decoded = ff::frame::Audio::empty();
-        let mut resampled = ff::frame::Audio::empty();
+        let mut sample_buf: Vec<f32> = Vec::new();
 
         'packets: for (pkt_stream, packet) in ictx.packets() {
             if stop.load(Ordering::Relaxed) {
@@ -187,18 +192,51 @@ fn decode_loop(
                 continue;
             }
             while decoder.receive_frame(&mut decoded).is_ok() {
+                // fresh output frame each time so swresample sizes it to the
+                // actual converted sample count (no capacity carryover)
+                let mut resampled = ff::frame::Audio::empty();
                 if resampler.run(&decoded, &mut resampled).is_err() {
                     continue;
                 }
-                let samples = resampled.plane::<f32>(0);
+                // PACKED interleaved f32: the real buffer is samples*channels
+                // long. plane::<f32>(0) would under-read to `samples` only,
+                // dropping every non-first channel -> 2x-fast garbled audio.
+                let ch = resampled.channels().max(1) as usize;
+                let count = resampled.samples() * ch;
+                let bytes = resampled.data(0);
+                if count == 0 || count * 4 > bytes.len() {
+                    continue;
+                }
+                sample_buf.clear();
+                sample_buf.reserve(count);
+                for i in 0..count {
+                    let o = i * 4;
+                    sample_buf.push(f32::from_ne_bytes([
+                        bytes[o],
+                        bytes[o + 1],
+                        bytes[o + 2],
+                        bytes[o + 3],
+                    ]));
+                }
+
                 let mut off = 0;
-                while off < samples.len() {
+                let mut stalls = 0u32;
+                while off < sample_buf.len() {
                     if stop.load(Ordering::Relaxed) {
                         return Ok(());
                     }
-                    off += prod.push_slice(&samples[off..]);
-                    if off < samples.len() {
-                        // ring full: the device hasn't drained yet -> wait
+                    let pushed = prod.push_slice(&sample_buf[off..]);
+                    if pushed > 0 {
+                        off += pushed;
+                        stalls = 0;
+                    } else {
+                        // ring full: device hasn't drained. If it stays wedged
+                        // ~3s the consumer is gone (device error) -> give up
+                        // rather than spin forever.
+                        stalls += 1;
+                        if stalls > 600 {
+                            return Ok(());
+                        }
                         std::thread::sleep(Duration::from_millis(5));
                     }
                 }
@@ -267,7 +305,8 @@ mod tests {
             }
             while decoder.receive_frame(&mut decoded).is_ok() {
                 if resampler.run(&decoded, &mut resampled).is_ok() {
-                    total += resampled.plane::<f32>(0).len();
+                    // count the full interleaved buffer (samples * channels)
+                    total += resampled.samples() * resampled.channels().max(1) as usize;
                     if total > 1000 {
                         break 'outer;
                     }

@@ -31,6 +31,11 @@ pub enum WsMessage {
         frame: WsVideoFrame,
     },
     Chat { user_id: String, username: String, content: String },
+    /// WebRTC signaling for the browser studio, relayed PEER-TO-PEER: `to` is
+    /// the target peer's id and the server delivers ONLY to that peer, rewriting
+    /// `from` to the authenticated sender so it cannot be spoofed. Terminal
+    /// clients ignore this variant; browser peers use it to negotiate SDP/ICE.
+    Signal { from: String, to: String, payload: serde_json::Value },
     /// game-scoped payload relayed to all OTHER clients; identity is
     /// rewritten server-side so it cannot be spoofed
     Game {
