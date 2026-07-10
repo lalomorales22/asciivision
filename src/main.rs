@@ -2342,6 +2342,7 @@ impl App {
         if self.screenshare.is_some() {
             self.screenshare = None;
             self.screen_frame = None;
+            *self.screen_proto.borrow_mut() = None; // drop the pixel-mode encode
             self.sharing_screen = false;
             if let Some(vc) = &self.video_chat {
                 vc.set_webcam_enabled(true); // hand the room feed back to the camera
@@ -3246,8 +3247,9 @@ impl App {
             if let Some(video) = &self.video {
                 // true-pixel path: blit the decoded frame via the terminal
                 // graphics protocol (image widget punches its own hole in the
-                // buffer). Falls through to half-block if not yet encoded.
-                if self.pixel_active() {
+                // buffer). Gated on has_signal() so a torn-down / swapped source
+                // never leaves a frozen last frame; falls through otherwise.
+                if self.pixel_active() && video.has_signal() {
                     let mut guard = self.video_proto.borrow_mut();
                     if let Some(proto) = guard.as_mut() {
                         frame.render_stateful_widget(
@@ -3352,7 +3354,9 @@ impl App {
             vertical: 1,
         });
 
-        if self.pixel_active() {
+        // gated on a live screen_frame so stopping the share falls through to
+        // the OFFLINE placeholder instead of blitting the frozen last desktop
+        if self.pixel_active() && self.screen_frame.is_some() {
             let mut guard = self.screen_proto.borrow_mut();
             if let Some(proto) = guard.as_mut() {
                 frame.render_stateful_widget(
