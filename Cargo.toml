@@ -31,3 +31,8 @@ vt100 = { package = "vt100-ctt", version = "0.17.1", default-features = false }
 flate2 = "1.1.9"
 base64 = "0.22.1"
 rayon = "1.12.0"
+# default-features off drops the chafa C-lib dependency (only enriches the
+# halfblocks fallback, which we don't use) and the heavy avif/rav1e codecs.
+# Kitty is native, iTerm2 needs image/png, Sixel uses pure-Rust icy_sixel.
+ratatui-image = { version = "=9.0.0", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

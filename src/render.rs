@@ -38,6 +38,7 @@ pub struct RgbFrame {
 }
 
 impl RgbFrame {
+    #[allow(dead_code)] // public constructor; used by tests + future frame sources
     pub fn new(width: u16, height: u16) -> Self {
         Self {
             width,

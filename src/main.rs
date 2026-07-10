@@ -29,6 +29,7 @@ mod effects;
 mod games;
 mod memory;
 mod message;
+mod gfx;
 mod palette;
 mod render;
 mod roomcode;
@@ -233,6 +234,14 @@ struct App {
     video: Option<VideoPlayer>,
     video_enabled: bool,
     video_render_mode: render::VideoRenderMode,
+    /// terminal graphics-protocol probe (true-pixel path); None until attached
+    picker: Option<ratatui_image::picker::Picker>,
+    /// a real pixel protocol (Kitty/iTerm2/Sixel) is available
+    hw_graphics: bool,
+    /// lazily-(re)built pixel protocol for the video panel + screen share.
+    /// RefCell so the &self render path can take the &mut the widget needs.
+    video_proto: std::cell::RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
+    screen_proto: std::cell::RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
     video_source_label: String,
     pending_video_load: bool,
     ollama_models: Vec<OllamaModelInfo>,
@@ -424,6 +433,10 @@ impl App {
             video_enabled: true,
             video,
             video_render_mode: render::VideoRenderMode::default(),
+            picker: None,
+            hw_graphics: false,
+            video_proto: std::cell::RefCell::new(None),
+            screen_proto: std::cell::RefCell::new(None),
             video_source_label,
             pending_video_load: false,
             ollama_models: Vec::new(),
@@ -737,10 +750,14 @@ impl App {
             self.status_note = "intro faded into live deck".to_string();
         }
 
+        let mut video_new = false;
         if let Some(video) = &mut self.video {
             if self.video_enabled || matches!(self.mode, AppMode::Intro) {
-                video.tick();
+                video_new = video.tick();
             }
+        }
+        if video_new {
+            self.rebuild_video_proto();
         }
 
         self.sysmon.refresh();
@@ -759,6 +776,7 @@ impl App {
 
         // poll screen share -- drive the local preview AND, when connected and
         // actively sharing, stream each captured frame into the room
+        let mut screen_new = false;
         if let Some(ref cam) = self.screenshare {
             let live = self.sharing_screen
                 && self.video_chat.as_ref().map_or(false, |c| c.is_connected());
@@ -769,12 +787,16 @@ impl App {
                     }
                 }
                 self.screen_frame = Some(frame);
+                screen_new = true;
             }
             if self.screen_frame.is_none() {
                 if let Some(err) = cam.error() {
                     self.status_note = format!("screen: {}", truncate(&err, 44));
                 }
             }
+        }
+        if screen_new {
+            self.rebuild_screen_proto();
         }
 
         self.sync_game_net();
@@ -2252,7 +2274,7 @@ impl App {
     }
 
     /// Cycle the video render mode (glyph <-> half-block <-> true pixels),
-    /// skipping Pixel until a terminal graphics protocol is detected.
+    /// skipping Pixel unless a terminal graphics protocol was detected.
     fn cycle_video_mode(&mut self) {
         let mut next = self.video_render_mode.cycle();
         if next == render::VideoRenderMode::Pixel && !self.pixel_protocol_available() {
@@ -2260,12 +2282,57 @@ impl App {
         }
         self.video_render_mode = next;
         self.status_note = format!("video render: {}", next.label());
+        // switching INTO pixel mode: encode the current frames now so the toggle
+        // is immediate instead of waiting for the next decoded frame
+        if next == render::VideoRenderMode::Pixel {
+            self.rebuild_video_proto();
+            self.rebuild_screen_proto();
+        }
     }
 
-    /// Whether the terminal supports a true-pixel graphics protocol. Wired to
-    /// real detection in the graphics-protocol sprint; false = half-block only.
+    /// True when a real pixel graphics protocol is available (else half-block).
     fn pixel_protocol_available(&self) -> bool {
-        false
+        self.hw_graphics
+    }
+
+    /// Store the startup graphics probe. Called once, after alt-screen, before
+    /// the event loop begins.
+    fn attach_graphics(&mut self, picker: ratatui_image::picker::Picker, hw_graphics: bool) {
+        self.picker = Some(picker);
+        self.hw_graphics = hw_graphics;
+    }
+
+    /// True while the video / screen-share panels should blit real pixels.
+    fn pixel_active(&self) -> bool {
+        self.hw_graphics && self.video_render_mode == render::VideoRenderMode::Pixel
+    }
+
+    /// Rebuild the video panel's pixel protocol from the latest decoded frame.
+    /// Cheap: it just stores the image; the resize+encode is lazy at render.
+    fn rebuild_video_proto(&self) {
+        if !self.pixel_active() {
+            return;
+        }
+        if let (Some(picker), Some(frame)) = (
+            self.picker.as_ref(),
+            self.video.as_ref().and_then(|v| v.latest_frame()),
+        ) {
+            if let Some(img) = gfx::frame_to_dynamic(frame) {
+                *self.video_proto.borrow_mut() = Some(picker.new_resize_protocol(img));
+            }
+        }
+    }
+
+    /// Rebuild the screen-share panel's pixel protocol from the latest frame.
+    fn rebuild_screen_proto(&self) {
+        if !self.pixel_active() {
+            return;
+        }
+        if let (Some(picker), Some(frame)) = (self.picker.as_ref(), self.screen_frame.as_ref()) {
+            if let Some(img) = gfx::frame_to_dynamic(frame) {
+                *self.screen_proto.borrow_mut() = Some(picker.new_resize_protocol(img));
+            }
+        }
     }
 
     /// Toggle screen sharing. Starts a desktop capture rendered locally in the
@@ -3177,6 +3244,21 @@ impl App {
 
         if self.video_enabled {
             if let Some(video) = &self.video {
+                // true-pixel path: blit the decoded frame via the terminal
+                // graphics protocol (image widget punches its own hole in the
+                // buffer). Falls through to half-block if not yet encoded.
+                if self.pixel_active() {
+                    let mut guard = self.video_proto.borrow_mut();
+                    if let Some(proto) = guard.as_mut() {
+                        frame.render_stateful_widget(
+                            ratatui_image::StatefulImage::default()
+                                .resize(ratatui_image::Resize::Fit(None)),
+                            inner,
+                            proto,
+                        );
+                        return;
+                    }
+                }
                 video.render(frame, inner, 0.92, self.video_render_mode);
                 let meta = format!(
                     "sig:{}  source:{}",
@@ -3270,6 +3352,17 @@ impl App {
             vertical: 1,
         });
 
+        if self.pixel_active() {
+            let mut guard = self.screen_proto.borrow_mut();
+            if let Some(proto) = guard.as_mut() {
+                frame.render_stateful_widget(
+                    ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None)),
+                    inner,
+                    proto,
+                );
+                return;
+            }
+        }
         if let Some(ref rgb) = self.screen_frame {
             render::render_frame(frame.buffer_mut(), inner, rgb, 0.95, self.video_render_mode);
         } else {
@@ -4544,6 +4637,18 @@ async fn run_app(
     let serve_port = args.serve;
     let connect_url = args.connect.clone();
     let mut app = App::new(args)?;
+
+    // one-time terminal graphics-protocol probe: after alt-screen, before the
+    // event loop reads input. Bulletproof -- unsupported/tmux/Apple Terminal
+    // resolve to half-block, so this never breaks the guaranteed path.
+    let (picker, hw_graphics, proto) = gfx::init_picker();
+    app.attach_graphics(picker, hw_graphics);
+    if hw_graphics {
+        app.add_system_message(format!(
+            "true-pixel graphics detected ({}) -- /vmode cycles to pixel for crisp video",
+            gfx::protocol_label(proto)
+        ));
+    }
 
     if let Some(port) = serve_port {
         if app.start_chat_server(port) {

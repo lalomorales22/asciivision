@@ -47,9 +47,14 @@ impl VideoPlayer {
         })
     }
 
-    pub fn tick(&mut self) {
+    /// Drain decoded frames, keeping only the newest. Returns true when the
+    /// latest frame changed this tick (so the pixel-protocol path only rebuilds
+    /// its encode on an actual new frame, not every 60fps redraw).
+    pub fn tick(&mut self) -> bool {
+        let mut got = false;
         while let Ok(frame) = self.rx.try_recv() {
             self.latest = Some(frame);
+            got = true;
         }
 
         if self.looping && self.finished.load(Ordering::Relaxed) && self.rx.is_empty() {
@@ -60,6 +65,7 @@ impl VideoPlayer {
                 self.rx = rx;
             }
         }
+        got
     }
 
     pub fn has_signal(&self) -> bool {
