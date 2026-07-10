@@ -14,7 +14,7 @@ ASCIIVision is a single Rust binary that packs an absurd amount of functionality
 - **Streaming Responses** -- AI responses appear character-by-character in real-time via SSE streaming (Claude, OpenAI, Grok), with seamless tool-use handoff mid-stream
 - **Agentic Tool Use** -- AI can autonomously execute shell commands, read/write files, search codebases, make HTTP requests, and query system info with configurable approval gates
 - **Shell Execution** -- run any bash command inline with `!<cmd>`, plus `/curl` and `/brew` shortcuts
-- **Video Playback** -- MP4 files and streamed YouTube sources decoded to real-time video via FFmpeg, with frame-rate-correct pacing. Renders as hi-res truecolor **half-blocks** (2x vertical resolution) by default, classic **ASCII glyphs**, or **true pixels** through the Kitty / iTerm2 / Sixel graphics protocols in terminals that support them -- auto-detected, with half-block as the universal fallback. `/vmode` cycles the three fidelity levels live
+- **Video Playback** -- MP4 files and streamed YouTube sources decoded to real-time video via FFmpeg, with frame-rate-correct pacing. Renders as hi-res truecolor **half-blocks** (2x vertical resolution) by default, classic **ASCII glyphs**, or **true pixels** through the Kitty / iTerm2 / Sixel graphics protocols in terminals that support them -- auto-detected, with half-block as the universal fallback. `/vmode` cycles the three fidelity levels live. Now with **audio** too -- FFmpeg-decoded and played through your output device (cpal), with `/mute` to toggle
 - **Live Webcam** -- your camera feed converted to ASCII art in real-time, with error reporting when the device is busy
 - **Command Palette** -- Ctrl+P fuzzy-searches every command, effect, game, layout, and AI provider; Enter executes it
 - **WebSocket Video Chat with Room Codes** -- `/host` starts a room and prints a short code; a friend types `/join <code>` -- no URLs, no IP hunting
@@ -210,6 +210,7 @@ The focused tile is highlighted with a double border.
 | `/webcam` | Toggle webcam |
 | `/vmode` | Cycle video fidelity: ASCII glyphs -> half-block (2x res) -> true pixels (Kitty/iTerm2/Sixel where supported) |
 | `/screenshare` | Share your desktop as live ASCII; when in a room it streams into the call as your feed (mutes your camera) |
+| `/mute` | Mute / unmute the video/YouTube audio |
 | `/3d` or `/effects` | Toggle 3D effects |
 | `/fx` | Cycle effects, then off |
 | `/fx <name>` | Jump straight to an effect (e.g. `/fx torus`, `/fx synthwave`) |

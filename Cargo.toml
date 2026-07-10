@@ -36,3 +36,5 @@ rayon = "1.12.0"
 # Kitty is native, iTerm2 needs image/png, Sixel uses pure-Rust icy_sixel.
 ratatui-image = { version = "=9.0.0", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+cpal = "0.18.1"
+ringbuf = "0.5.0"

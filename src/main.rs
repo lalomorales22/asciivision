@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 
 mod ai;
 mod analytics;
+mod audio;
 mod client;
 mod commands;
 mod db;
@@ -62,6 +63,7 @@ use sysmon::SystemMonitor;
 use tiling::{LayoutPreset, PanelKind, TilingManager};
 use tiles::TilesPanel;
 use tools::{ToolCall, ToolResult, TrustLevel};
+use audio::AudioPlayer;
 use video::VideoPlayer;
 use theme::t;
 use webcam::WebcamCapture;
@@ -108,6 +110,10 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     no_video: bool,
+
+    /// Disable audio playback for videos
+    #[arg(long, default_value_t = false)]
+    no_audio: bool,
 
     #[arg(long, default_value_t = false)]
     no_db: bool,
@@ -243,6 +249,11 @@ struct App {
     video_proto: std::cell::RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
     screen_proto: std::cell::RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
     video_source_label: String,
+    /// audio playback for the current video source (None = silent / no device)
+    audio: Option<AudioPlayer>,
+    /// persisted mute preference (survives video reloads + loops)
+    audio_muted: bool,
+    no_audio: bool,
     pending_video_load: bool,
     ollama_models: Vec<OllamaModelInfo>,
     ollama_selected_model: Option<String>,
@@ -389,9 +400,19 @@ impl App {
             .and_then(|name| name.to_str())
             .unwrap_or("synthetic raster")
             .to_string();
-        let video = match video_path {
-            Some(path) => Some(VideoPlayer::new(path, video::DECODE_BOX, true)?),
-            None => None,
+        let (video, audio) = match video_path {
+            Some(path) => {
+                let player = VideoPlayer::new(path.clone(), video::DECODE_BOX, true)?;
+                // audio follows the same source (looping); ok() so a video with
+                // no audio stream or a machine with no output device just runs silent
+                let audio = if args.no_audio {
+                    None
+                } else {
+                    AudioPlayer::new(path, true).ok()
+                };
+                (Some(player), audio)
+            }
+            None => (None, None),
         };
 
         let db = if args.no_db {
@@ -438,6 +459,9 @@ impl App {
             video_proto: std::cell::RefCell::new(None),
             screen_proto: std::cell::RefCell::new(None),
             video_source_label,
+            audio,
+            audio_muted: false,
+            no_audio: args.no_audio,
             pending_video_load: false,
             ollama_models: Vec::new(),
             ollama_selected_model: None,
@@ -1086,9 +1110,10 @@ impl App {
                 }
                 AppEvent::YoutubeReady { title, source } => {
                     self.pending_video_load = false;
-                    match VideoPlayer::new(source, video::DECODE_BOX, false) {
+                    match VideoPlayer::new(source.clone(), video::DECODE_BOX, false) {
                         Ok(player) => {
                             self.video = Some(player);
+                            self.start_audio(source, false);
                             self.video_enabled = true;
                             self.video_source_label = title.clone();
                             self.tiling.set_focused_panel(PanelKind::Video);
@@ -1693,6 +1718,9 @@ impl App {
             }
             CommandId::Screenshare => {
                 self.toggle_screenshare();
+            }
+            CommandId::Mute => {
+                self.toggle_mute();
             }
             CommandId::Youtube => {
                 let url = args.to_string();
@@ -2333,6 +2361,35 @@ impl App {
                 *self.screen_proto.borrow_mut() = Some(picker.new_resize_protocol(img));
             }
         }
+    }
+
+    /// Start (or replace) audio playback for a video source, honoring the mute
+    /// preference and --no-audio. Silent on failure (no device / no audio
+    /// stream) -- never fatal.
+    fn start_audio(&mut self, source: impl Into<std::path::PathBuf>, looping: bool) {
+        if self.no_audio {
+            self.audio = None;
+            return;
+        }
+        self.audio = AudioPlayer::new(source, looping).ok();
+        if let Some(a) = &self.audio {
+            a.set_muted(self.audio_muted);
+        }
+    }
+
+    /// Toggle audio mute (persists across video reloads + loops).
+    fn toggle_mute(&mut self) {
+        self.audio_muted = !self.audio_muted;
+        if let Some(a) = &self.audio {
+            a.set_muted(self.audio_muted);
+        }
+        self.status_note = if self.audio_muted {
+            "audio muted".to_string()
+        } else if self.audio.is_some() {
+            "audio on".to_string()
+        } else {
+            "no audio (silent source or no output device)".to_string()
+        };
     }
 
     /// Toggle screen sharing. Starts a desktop capture rendered locally in the
@@ -4161,8 +4218,11 @@ async fn resolve_youtube_stream(url: String) -> Result<YoutubeStream> {
         .arg("--no-playlist")
         .arg("--no-warnings")
         .arg("--get-url")
+        // prefer a single MUXED stream so the resolved URL carries audio too
+        // (bestvideo alone is video-only -> silent). Muxed caps ~720p, which is
+        // plenty for ASCII/half-block.
         .arg("--format")
-        .arg("bestvideo[height<=720]/best[height<=720]/bestvideo/best")
+        .arg("best[height<=720]/best")
         .arg(&url)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
