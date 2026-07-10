@@ -1,6 +1,6 @@
-use crate::message::{UserInfo, WsMessage, PROTOCOL_VERSION};
-use crate::video::AsciiFrame;
-use crate::webcam::{ascii_frame_to_ws, ws_frame_to_ascii, WebcamCapture, WebcamConfig};
+use crate::message::{rgb_frame_to_ws, ws_frame_to_rgb, UserInfo, WsMessage, PROTOCOL_VERSION};
+use crate::render::RgbFrame;
+use crate::webcam::{WebcamCapture, WebcamConfig};
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
 use parking_lot::{Mutex as PlMutex, RwLock};
@@ -49,7 +49,7 @@ pub enum NetEvent {
 enum Outgoing {
     Chat(String),
     Game(String, Value),
-    Frame(AsciiFrame),
+    Frame(RgbFrame),
 }
 
 /// Resolve once the shutdown flag flips to true (Send-friendly wrapper:
@@ -64,8 +64,8 @@ pub struct VideoChatClient {
     /// roster as reported by the server (user_id + username + connected_at)
     pub connected_users: Arc<RwLock<Vec<UserInfo>>>,
     /// remote video feeds keyed by user_id -> (username, frame)
-    pub remote_frames: Arc<RwLock<HashMap<String, (String, AsciiFrame)>>>,
-    pub local_frame: Arc<RwLock<Option<AsciiFrame>>>,
+    pub remote_frames: Arc<RwLock<HashMap<String, (String, RgbFrame)>>>,
+    pub local_frame: Arc<RwLock<Option<RgbFrame>>>,
     /// (username, content) pairs; own messages are appended locally on send,
     /// exactly once (the server does not echo back to the sender)
     pub chat_messages: Arc<RwLock<Vec<(String, String)>>>,
@@ -125,8 +125,9 @@ impl VideoChatClient {
         *self.event_hook.write() = Some(Arc::new(hook));
     }
 
-    /// Disable the client-owned webcam capture (tests, headless use).
-    #[allow(dead_code)]
+    /// Enable/disable sending the client's own camera feed. Toggled at runtime
+    /// when the App takes over the outgoing feed (e.g. screen sharing streams
+    /// the desktop via `send_frame` instead), and disabled in headless tests.
     pub fn set_webcam_enabled(&self, enabled: bool) {
         self.webcam_enabled.store(enabled, Ordering::Relaxed);
     }
@@ -148,9 +149,9 @@ impl VideoChatClient {
         let _ = self.out_tx.send(Outgoing::Game(game.to_string(), payload));
     }
 
-    /// Queue an ASCII frame as this client's video feed (also updates the
-    /// local preview). The webcam pump uses this same path.
-    pub fn send_frame(&self, frame: AsciiFrame) {
+    /// Queue an RGB frame as this client's video feed (also updates the local
+    /// preview). The webcam pump uses this same path.
+    pub fn send_frame(&self, frame: RgbFrame) {
         *self.local_frame.write() = Some(frame.clone());
         let _ = self.out_tx.send(Outgoing::Frame(frame));
     }
@@ -239,7 +240,16 @@ impl VideoChatClient {
         }
 
         let webcam = if self.webcam_enabled.load(Ordering::Relaxed) {
-            WebcamCapture::start(WebcamConfig::default()).ok()
+            // A bandwidth-friendly box for the wire: feeds render into small
+            // grid tiles, so a modest pixel frame at 15fps keeps the compressed
+            // stream light while still looking sharp in half-block.
+            WebcamCapture::start(WebcamConfig {
+                width: 160,
+                height: 120,
+                fps_cap: 15,
+                ..WebcamConfig::default()
+            })
+            .ok()
         } else {
             None
         };
@@ -322,7 +332,7 @@ impl VideoChatClient {
                                 Outgoing::Frame(frame) => WsMessage::Frame {
                                     user_id: my_id,
                                     username: me.username.clone(),
-                                    frame: ascii_frame_to_ws(&frame),
+                                    frame: rgb_frame_to_ws(&frame),
                                 },
                             };
                             if let Ok(json) = serde_json::to_string(&msg) {
@@ -346,8 +356,13 @@ impl VideoChatClient {
                     tokio::select! {
                         _ = wait_shutdown(&mut shutdown) => break,
                         _ = tokio::time::sleep(Duration::from_millis(33)) => {
+                            // honor the mute flag at runtime: while the App is
+                            // screen sharing it drives the feed itself, so the
+                            // camera frames are drained-and-dropped here
                             if let Some(frame) = cam.try_recv() {
-                                me.send_frame(frame);
+                                if me.webcam_enabled.load(Ordering::Relaxed) {
+                                    me.send_frame(frame);
+                                }
                             }
                         }
                     }
@@ -458,10 +473,10 @@ impl VideoChatClient {
                 username,
                 frame,
             } => {
-                // malformed frames (hostile dims / mismatched buffer) decode
+                // malformed frames (hostile dims / decompression bombs) decode
                 // to None and are dropped -- never trusted with an allocation
-                if let Some(ascii) = ws_frame_to_ascii(&frame) {
-                    self.remote_frames.write().insert(user_id, (username, ascii));
+                if let Some(rgb) = ws_frame_to_rgb(&frame) {
+                    self.remote_frames.write().insert(user_id, (username, rgb));
                 }
             }
             WsMessage::Chat {
@@ -613,12 +628,10 @@ mod tests {
             "game messages must not be echoed to the sender"
         );
 
-        // --- frames from A reach B, keyed by user_id, multi-byte glyph intact ---
-        a.send_frame(AsciiFrame {
-            width: 2,
-            height: 1,
-            cells: vec![('▀', 255, 0, 0), ('X', 0, 255, 0)],
-        });
+        // --- frames from A reach B, keyed by user_id, pixels intact over the wire ---
+        let mut sent = RgbFrame::new(2, 1);
+        sent.data = vec![255, 0, 0, 0, 255, 0]; // red pixel, green pixel
+        a.send_frame(sent);
         wait_for("frame delivery", || {
             b.remote_frames.read().contains_key(&a_id)
         })
@@ -627,8 +640,12 @@ mod tests {
             let frames = b.remote_frames.read();
             let (uname, frame) = frames.get(&a_id).unwrap();
             assert_eq!(uname, "alice");
-            assert_eq!(frame.cells[0], ('▀', 255, 0, 0), "glyph must survive the wire");
-            assert_eq!(frame.cells[1], ('X', 0, 255, 0));
+            assert_eq!((frame.width, frame.height), (2, 1));
+            assert_eq!(
+                frame.data,
+                vec![255, 0, 0, 0, 255, 0],
+                "pixels must survive the compressed wire"
+            );
         }
         assert!(
             !a.remote_frames.read().contains_key(&a_id),

@@ -358,7 +358,8 @@ impl VideoChatServer {
 mod tests {
     use super::*;
     use crate::client::VideoChatClient;
-    use crate::message::WsAsciiFrame;
+    use crate::message::{rgb_frame_to_ws, WsVideoFrame, MAX_ENCODED_BYTES};
+    use crate::render::RgbFrame;
 
     async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..250 {
@@ -388,7 +389,7 @@ mod tests {
         )
     }
 
-    fn frame_msg(frame: WsAsciiFrame) -> WsMessage {
+    fn frame_msg(frame: WsVideoFrame) -> WsMessage {
         WsMessage::Frame {
             user_id: String::new(),
             username: String::new(),
@@ -465,30 +466,31 @@ mod tests {
         let (mut attacker_tx, _attacker_rx) = attacker_ws.split();
         attacker_tx.send(join_text("attacker")).await.unwrap();
 
-        // the finding-#3 attack: ~60 bytes of JSON claiming a ~34GB frame
-        let hostile = frame_msg(WsAsciiFrame {
+        // the finding-#3 attack: tiny message claiming an enormous frame --
+        // rejected by the pixel-dimension caps before any allocation
+        let hostile = frame_msg(WsVideoFrame {
             width: 65535,
             height: 65535,
-            data: vec![],
+            data: "AAAA".to_string(),
         });
-        // mismatched: claims 2x1 but carries one cell of data
-        let mismatched = frame_msg(WsAsciiFrame {
+        // oversized encoded payload: past the byte cap, dropped before decode
+        let oversized = frame_msg(WsVideoFrame {
             width: 2,
-            height: 1,
-            data: vec![65, 1, 2, 3],
+            height: 2,
+            data: "A".repeat(MAX_ENCODED_BYTES + 1),
         });
-        // a well-formed 1x1 frame, then a sentinel chat to bound the read
-        let valid = frame_msg(WsAsciiFrame {
-            width: 1,
-            height: 1,
-            data: vec!['A' as u32, 9, 9, 9],
-        });
+        // a well-formed compressed frame, then a sentinel chat to bound the read
+        let valid = frame_msg(rgb_frame_to_ws(&{
+            let mut f = RgbFrame::new(1, 1);
+            f.data = vec![9, 9, 9];
+            f
+        }));
         let sentinel = WsMessage::Chat {
             user_id: String::new(),
             username: String::new(),
             content: "sentinel".to_string(),
         };
-        for msg in [&hostile, &mismatched, &valid, &sentinel] {
+        for msg in [&hostile, &oversized, &valid, &sentinel] {
             attacker_tx
                 .send(TungsteniteMsg::Text(serde_json::to_string(msg).unwrap()))
                 .await

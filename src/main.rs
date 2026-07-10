@@ -30,6 +30,7 @@ mod games;
 mod memory;
 mod message;
 mod palette;
+mod render;
 mod roomcode;
 mod server;
 mod shader;
@@ -231,6 +232,7 @@ struct App {
     ai_client: AIClient,
     video: Option<VideoPlayer>,
     video_enabled: bool,
+    video_render_mode: render::VideoRenderMode,
     video_source_label: String,
     pending_video_load: bool,
     ollama_models: Vec<OllamaModelInfo>,
@@ -268,7 +270,12 @@ struct App {
     tiling: TilingManager,
     sysmon: SystemMonitor,
     webcam: Option<WebcamCapture>,
-    webcam_frame: Option<video::AsciiFrame>,
+    webcam_frame: Option<render::RgbFrame>,
+    /// live screen capture (desktop) when screen sharing / previewing
+    screenshare: Option<WebcamCapture>,
+    screen_frame: Option<render::RgbFrame>,
+    /// true while the captured screen is being streamed into the room
+    sharing_screen: bool,
     video_chat: Option<Arc<VideoChatClient>>,
     /// hosted video chat server handle, if this instance is hosting
     chat_server: Option<Arc<VideoChatServer>>,
@@ -374,7 +381,7 @@ impl App {
             .unwrap_or("synthetic raster")
             .to_string();
         let video = match video_path {
-            Some(path) => Some(VideoPlayer::new(path, (132, 46), true)?),
+            Some(path) => Some(VideoPlayer::new(path, video::DECODE_BOX, true)?),
             None => None,
         };
 
@@ -391,8 +398,8 @@ impl App {
 
         let webcam = if args.webcam {
             let config = webcam::WebcamConfig {
-                width: 160,
-                height: 48,
+                width: 320,
+                height: 240,
                 ..webcam::WebcamConfig::default()
             };
             WebcamCapture::start(config).ok()
@@ -416,6 +423,7 @@ impl App {
             ai_client: AIClient::new(provider.clone(), None),
             video_enabled: true,
             video,
+            video_render_mode: render::VideoRenderMode::default(),
             video_source_label,
             pending_video_load: false,
             ollama_models: Vec::new(),
@@ -453,6 +461,9 @@ impl App {
             sysmon: SystemMonitor::new(),
             webcam,
             webcam_frame: None,
+            screenshare: None,
+            screen_frame: None,
+            sharing_screen: false,
             video_chat: None,
             chat_server: None,
             chat_server_port: None,
@@ -746,6 +757,26 @@ impl App {
             }
         }
 
+        // poll screen share -- drive the local preview AND, when connected and
+        // actively sharing, stream each captured frame into the room
+        if let Some(ref cam) = self.screenshare {
+            let live = self.sharing_screen
+                && self.video_chat.as_ref().map_or(false, |c| c.is_connected());
+            while let Some(frame) = cam.try_recv() {
+                if live {
+                    if let Some(vc) = &self.video_chat {
+                        vc.send_frame(frame.clone());
+                    }
+                }
+                self.screen_frame = Some(frame);
+            }
+            if self.screen_frame.is_none() {
+                if let Some(err) = cam.error() {
+                    self.status_note = format!("screen: {}", truncate(&err, 44));
+                }
+            }
+        }
+
         self.sync_game_net();
 
         while let Ok(event) = self.events_rx.try_recv() {
@@ -1033,7 +1064,7 @@ impl App {
                 }
                 AppEvent::YoutubeReady { title, source } => {
                     self.pending_video_load = false;
-                    match VideoPlayer::new(source, (132, 46), false) {
+                    match VideoPlayer::new(source, video::DECODE_BOX, false) {
                         Ok(player) => {
                             self.video = Some(player);
                             self.video_enabled = true;
@@ -1635,6 +1666,12 @@ impl App {
                     "video bus muted".to_string()
                 };
             }
+            CommandId::VideoMode => {
+                self.cycle_video_mode();
+            }
+            CommandId::Screenshare => {
+                self.toggle_screenshare();
+            }
             CommandId::Youtube => {
                 let url = args.to_string();
                 if url.is_empty() {
@@ -2205,20 +2242,80 @@ impl App {
     }
 
     fn webcam_config(&self) -> webcam::WebcamConfig {
-        let w = if self.body_area.width > 10 {
-            self.body_area.width.max(120).min(300)
-        } else {
-            200
-        };
-        let h = if self.body_area.height > 6 {
-            self.body_area.height.max(30).min(80)
-        } else {
-            50
-        };
+        // A generous SQUARE-pixel box for the local view; the renderer scales it
+        // into whatever panel the webcam lands in (these are pixels, not cells).
         webcam::WebcamConfig {
-            width: w,
-            height: h,
+            width: 320,
+            height: 240,
             ..webcam::WebcamConfig::default()
+        }
+    }
+
+    /// Cycle the video render mode (glyph <-> half-block <-> true pixels),
+    /// skipping Pixel until a terminal graphics protocol is detected.
+    fn cycle_video_mode(&mut self) {
+        let mut next = self.video_render_mode.cycle();
+        if next == render::VideoRenderMode::Pixel && !self.pixel_protocol_available() {
+            next = next.cycle();
+        }
+        self.video_render_mode = next;
+        self.status_note = format!("video render: {}", next.label());
+    }
+
+    /// Whether the terminal supports a true-pixel graphics protocol. Wired to
+    /// real detection in the graphics-protocol sprint; false = half-block only.
+    fn pixel_protocol_available(&self) -> bool {
+        false
+    }
+
+    /// Toggle screen sharing. Starts a desktop capture rendered locally in the
+    /// SCREEN SHARE panel and -- when connected to a room -- streamed into it as
+    /// this client's feed (the camera is muted for the duration).
+    fn toggle_screenshare(&mut self) {
+        if self.screenshare.is_some() {
+            self.screenshare = None;
+            self.screen_frame = None;
+            self.sharing_screen = false;
+            if let Some(vc) = &self.video_chat {
+                vc.set_webcam_enabled(true); // hand the room feed back to the camera
+            }
+            self.status_note = "screen share stopped".to_string();
+            return;
+        }
+        match WebcamCapture::start(self.screenshare_config()) {
+            Ok(cap) => {
+                self.screenshare = Some(cap);
+                self.sharing_screen = true;
+                self.tiling.set_focused_panel(PanelKind::ScreenShare);
+                let live = self
+                    .video_chat
+                    .as_ref()
+                    .map_or(false, |c| c.is_connected());
+                if live {
+                    if let Some(vc) = &self.video_chat {
+                        vc.set_webcam_enabled(false); // App now drives the outgoing feed
+                    }
+                    self.status_note = "screen share LIVE -> room".to_string();
+                } else {
+                    self.status_note = "screen share preview (join a room to share)".to_string();
+                }
+            }
+            Err(e) => {
+                self.add_system_message(format!("screen share failed: {}", e));
+                self.status_note = "screen share failed (see transcript)".to_string();
+            }
+        }
+    }
+
+    fn screenshare_config(&self) -> webcam::WebcamConfig {
+        // Screens carry fine detail (text/UI) so favor resolution, but keep the
+        // frame rate low -- flat UI regions compress well and the wire stays light.
+        webcam::WebcamConfig {
+            device: resolve_screen_device(),
+            width: 480,
+            height: 270,
+            fps_cap: 12,
+            source: webcam::CaptureSource::Screen,
         }
     }
 
@@ -2325,6 +2422,12 @@ impl App {
         }
         let client = Arc::new(VideoChatClient::new(self.username.clone(), url));
         client.set_event_hook(self.net_event_hook());
+        // If a screen share is already active, the App drives the outgoing feed
+        // (desktop frames via tick), so the client's camera must be muted from
+        // its very first frame. A fresh client defaults webcam_enabled=true, so
+        // without this a /screenshare-then-/join (or a reconnect while sharing)
+        // would broadcast BOTH the webcam and the screen -- a privacy leak.
+        client.set_webcam_enabled(!self.sharing_screen);
         self.video_chat = Some(Arc::clone(&client));
         let events_tx = self.events_tx.clone();
         let dial_generation = Arc::clone(&self.dial_generation);
@@ -2691,6 +2794,7 @@ impl App {
                     vertical: 1,
                 }),
                 0.95,
+                self.video_render_mode,
             );
         }
 
@@ -2844,6 +2948,7 @@ impl App {
             PanelKind::Tiles => self.tiles.render(frame, area, is_focused),
             PanelKind::Video => self.render_video_panel(frame, area, phase),
             PanelKind::Webcam => self.render_webcam_panel(frame, area, phase),
+            PanelKind::ScreenShare => self.render_screenshare_panel(frame, area, phase),
             PanelKind::Telemetry => self.render_telemetry(frame, area, phase),
             PanelKind::OpsDeck => self.render_ops_panel(frame, area, phase),
             PanelKind::Effects3D => {
@@ -3072,7 +3177,7 @@ impl App {
 
         if self.video_enabled {
             if let Some(video) = &self.video {
-                video.render(frame, inner, 0.92);
+                video.render(frame, inner, 0.92, self.video_render_mode);
                 let meta = format!(
                     "sig:{}  source:{}",
                     if video.has_signal() { "lock" } else { "seek" },
@@ -3115,8 +3220,8 @@ impl App {
             vertical: 1,
         });
 
-        if let Some(ref ascii) = self.webcam_frame {
-            render_ascii_frame(frame.buffer_mut(), inner, ascii, 0.9);
+        if let Some(ref rgb) = self.webcam_frame {
+            render::render_frame(frame.buffer_mut(), inner, rgb, 0.9, self.video_render_mode);
         } else {
             let msg = if let Some(ref cam) = self.webcam {
                 if let Some(err) = cam.error() {
@@ -3132,6 +3237,56 @@ impl App {
             } else {
                 t().muted
             };
+            frame.render_widget(
+                Paragraph::new(msg)
+                    .style(Style::default().fg(color).bg(t().panel_bg))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: false }),
+                inner,
+            );
+        }
+    }
+
+    fn render_screenshare_panel(&self, frame: &mut Frame, area: Rect, _phase: f32) {
+        let connected = self.video_chat.as_ref().map_or(false, |c| c.is_connected());
+        let title = if self.screenshare.is_some() {
+            if self.sharing_screen && connected {
+                " SCREEN SHARE // LIVE -> ROOM "
+            } else {
+                " SCREEN SHARE // PREVIEW "
+            }
+        } else {
+            " SCREEN SHARE // OFFLINE "
+        };
+        let block = Block::default()
+            .title(title)
+            .title_style(Style::default().fg(t().accent2).bold())
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t().accent1));
+        frame.render_widget(block, area);
+
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+
+        if let Some(ref rgb) = self.screen_frame {
+            render::render_frame(frame.buffer_mut(), inner, rgb, 0.95, self.video_render_mode);
+        } else {
+            let has_err = self.screenshare.as_ref().and_then(|c| c.error()).is_some();
+            let msg = if let Some(ref cam) = self.screenshare {
+                if let Some(err) = cam.error() {
+                    format!(
+                        "SCREEN CAPTURE ERROR: {}\n\nmacOS: grant Screen Recording to your terminal in\nSystem Settings > Privacy & Security > Screen Recording,\nthen restart asciivision.",
+                        err
+                    )
+                } else {
+                    "acquiring display...\n(macOS may prompt for Screen Recording permission)".to_string()
+                }
+            } else {
+                "/screenshare to broadcast your desktop as live ASCII".to_string()
+            };
+            let color = if has_err { t().danger } else { t().muted };
             frame.render_widget(
                 Paragraph::new(msg)
                     .style(Style::default().fg(color).bg(t().panel_bg))
@@ -3302,13 +3457,13 @@ impl App {
             // the self-view must come from local_frame. It is ALWAYS tile 0
             // ("you"); remote feeds fill the remaining tiles, capped at 4
             // total. Feeds beyond the grid are summarized as "+N more".
-            let mut tiles: Vec<(String, &video::AsciiFrame, bool)> = Vec::new();
+            let mut tiles: Vec<(String, &render::RgbFrame, bool)> = Vec::new();
             if let Some(ref own) = *local {
                 tiles.push((format!("{} (you)", self.username), own, true));
             }
-            let mut remotes: Vec<(&String, &String, &video::AsciiFrame)> = remote
+            let mut remotes: Vec<(&String, &String, &render::RgbFrame)> = remote
                 .iter()
-                .map(|(uid, (uname, ascii))| (uname, uid, ascii))
+                .map(|(uid, (uname, rgb))| (uname, uid, rgb))
                 .collect();
             // stable grid order (HashMap iteration order must not decide
             // which feeds are shown when more than 4 are live)
@@ -3353,13 +3508,14 @@ impl App {
                         .split(row_layout[r]);
 
                     for c in 0..cols {
-                        if let Some((label, ascii_frame, is_self)) = tile_iter.next() {
+                        if let Some((label, rgb_frame, is_self)) = tile_iter.next() {
                             let cell_area = col_layout[c];
-                            render_ascii_frame(
+                            render::render_frame(
                                 frame.buffer_mut(),
                                 cell_area,
-                                ascii_frame,
+                                rgb_frame,
                                 if *is_self { 0.9 } else { 0.85 },
+                                self.video_render_mode,
                             );
                             render_gradient_text(
                                 frame.buffer_mut(),
@@ -3954,91 +4110,61 @@ fn command_error_message(context: &str, output: &std::process::Output) -> String
     }
 }
 
+/// Resolve the platform capture-device string for the primary display. On macOS
+/// the avfoundation screen index is (num_cameras + N); we discover it by asking
+/// ffmpeg to list devices and parsing the first "Capture screen" entry, falling
+/// back to index 1 (the common single-camera case). Linux/Windows use their
+/// fixed x11grab/gdigrab selectors (webcam.rs maps these per-OS).
+fn resolve_screen_device() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-f",
+                "avfoundation",
+                "-list_devices",
+                "true",
+                "-i",
+                "",
+            ])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stderr);
+            for line in text.lines() {
+                if let Some(pos) = line.find("Capture screen") {
+                    let prefix = &line[..pos];
+                    if let (Some(lb), Some(rb)) = (prefix.rfind('['), prefix.rfind(']')) {
+                        if lb < rb {
+                            if let Ok(n) = prefix[lb + 1..rb].trim().parse::<u32>() {
+                                return n.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "1".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ":0.0".to_string()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "desktop".to_string()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        "0".to_string()
+    }
+}
+
 fn ytdlp_spawn_error(error: std::io::Error) -> anyhow::Error {
     if error.kind() == std::io::ErrorKind::NotFound {
         anyhow::anyhow!("yt-dlp is not installed. install it first, then retry /youtube")
     } else {
         anyhow::Error::new(error).context("spawn yt-dlp")
-    }
-}
-
-fn render_ascii_frame(buffer: &mut Buffer, area: Rect, ascii: &video::AsciiFrame, intensity: f32) {
-    if area.width == 0 || area.height == 0 || ascii.width == 0 || ascii.height == 0 {
-        return;
-    }
-
-    // If source matches destination closely, render directly (fast path)
-    let needs_scaling =
-        ascii.width.abs_diff(area.width) > 2 || ascii.height.abs_diff(area.height) > 2;
-
-    if !needs_scaling {
-        let content_width = std::cmp::min(ascii.width, area.width);
-        let content_height = std::cmp::min(ascii.height, area.height);
-        let offset_x = area.x + (area.width - content_width) / 2;
-        let offset_y = area.y + (area.height - content_height) / 2;
-
-        for y in 0..content_height {
-            for x in 0..content_width {
-                let index = y as usize * ascii.width as usize + x as usize;
-                if index >= ascii.cells.len() {
-                    break;
-                }
-                let (glyph, r, g, b) = ascii.cells[index];
-                let scanline = if y % 2 == 0 { 0.84 } else { 1.0 };
-                let factor = (intensity * scanline).clamp(0.1, 1.2);
-                let fg = scale_rgb(r, g, b, factor);
-                let bg = scale_rgb(r, g, b, factor * 0.16);
-
-                if let Some(cell) = buffer.cell_mut((offset_x + x, offset_y + y)) {
-                    cell.set_char(glyph);
-                    cell.set_fg(fg);
-                    cell.set_bg(bg);
-                }
-            }
-        }
-        return;
-    }
-
-    // Scaled path: nearest-neighbor sampling with aspect-ratio-preserving letterbox.
-    // Both source and destination are in terminal-cell coordinates (where each cell
-    // is ~2x taller than wide), so we compare ratios directly -- no extra correction
-    // needed here since the webcam capture already accounts for cell aspect ratio.
-    let src_ratio = ascii.width as f32 / ascii.height as f32;
-    let dst_ratio = area.width as f32 / area.height as f32;
-
-    let (fit_w, fit_h) = if src_ratio > dst_ratio {
-        let h = (area.width as f32 / src_ratio).round().max(1.0) as u16;
-        (area.width, h.min(area.height))
-    } else {
-        let w = (area.height as f32 * src_ratio).round().max(1.0) as u16;
-        (w.min(area.width), area.height)
-    };
-
-    let offset_x = area.x + (area.width.saturating_sub(fit_w)) / 2;
-    let offset_y = area.y + (area.height.saturating_sub(fit_h)) / 2;
-
-    for y in 0..fit_h {
-        let src_y = ((y as f32 * ascii.height as f32 / fit_h as f32) as usize)
-            .min(ascii.height as usize - 1);
-        for x in 0..fit_w {
-            let src_x = ((x as f32 * ascii.width as f32 / fit_w as f32) as usize)
-                .min(ascii.width as usize - 1);
-            let index = src_y * ascii.width as usize + src_x;
-            if index >= ascii.cells.len() {
-                continue;
-            }
-            let (glyph, r, g, b) = ascii.cells[index];
-            let scanline = if y % 2 == 0 { 0.84 } else { 1.0 };
-            let factor = (intensity * scanline).clamp(0.1, 1.2);
-            let fg = scale_rgb(r, g, b, factor);
-            let bg = scale_rgb(r, g, b, factor * 0.16);
-
-            if let Some(cell) = buffer.cell_mut((offset_x + x, offset_y + y)) {
-                cell.set_char(glyph);
-                cell.set_fg(fg);
-                cell.set_bg(bg);
-            }
-        }
     }
 }
 
@@ -4322,14 +4448,6 @@ fn to_rgb(color: Color) -> (u8, u8, u8) {
         Color::DarkGray => (64, 64, 64),
         _ => (180, 180, 180),
     }
-}
-
-fn scale_rgb(r: u8, g: u8, b: u8, factor: f32) -> Color {
-    Color::Rgb(
-        (r as f32 * factor).clamp(0.0, 255.0) as u8,
-        (g as f32 * factor).clamp(0.0, 255.0) as u8,
-        (b as f32 * factor).clamp(0.0, 255.0) as u8,
-    )
 }
 
 fn format_ollama_model_meta(model: &OllamaModelInfo) -> String {

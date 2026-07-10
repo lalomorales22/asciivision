@@ -10,39 +10,59 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use crate::message::WsAsciiFrame;
-use crate::video::AsciiFrame;
+use crate::render::RgbFrame;
+use crate::video::to_rgb_frame;
 
-const PALETTE: &[u8] = b" .'`^\",:;Il!i><~+_-?][}{1)(|\\tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+/// Which live capture source a [`WebcamCapture`] pulls from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureSource {
+    /// A physical camera device.
+    Camera,
+    /// The desktop / a display (screen sharing).
+    Screen,
+}
+
+impl Default for CaptureSource {
+    fn default() -> Self {
+        CaptureSource::Camera
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WebcamConfig {
+    /// Device selector. For a camera this is the OS device index ("0"); for a
+    /// screen it is the platform's screen selector (filled in per-OS when the
+    /// source is `Screen`, so callers may leave it at the default).
     pub device: String,
+    /// Maximum output pixel box (aspect ratio is preserved within it). These
+    /// are PIXELS now, not cells -- the renderer handles cell-aspect + scaling.
     pub width: u16,
     pub height: u16,
     pub fps_cap: u32,
+    pub source: CaptureSource,
 }
 
 impl Default for WebcamConfig {
     fn default() -> Self {
         Self {
             device: "0".to_string(),
-            width: 160,
-            height: 48,
+            width: 320,
+            height: 240,
             fps_cap: 30,
+            source: CaptureSource::Camera,
         }
     }
 }
 
 pub struct WebcamCapture {
-    receiver: Receiver<AsciiFrame>,
+    receiver: Receiver<RgbFrame>,
     active: Arc<AtomicBool>,
     error: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl WebcamCapture {
     pub fn start(config: WebcamConfig) -> Result<Self> {
-        let (tx, rx) = bounded::<AsciiFrame>(4);
+        let (tx, rx) = bounded::<RgbFrame>(4);
         let active = Arc::new(AtomicBool::new(true));
         let active_clone = active.clone();
         let error: Arc<parking_lot::Mutex<Option<String>>> =
@@ -57,7 +77,7 @@ impl WebcamCapture {
                 }
             }));
             if result.is_err() {
-                *error_clone.lock() = Some("webcam thread panicked".to_string());
+                *error_clone.lock() = Some("capture thread panicked".to_string());
             }
         });
 
@@ -68,7 +88,7 @@ impl WebcamCapture {
         })
     }
 
-    pub fn try_recv(&self) -> Option<AsciiFrame> {
+    pub fn try_recv(&self) -> Option<RgbFrame> {
         self.receiver.try_recv().ok()
     }
 
@@ -83,17 +103,11 @@ impl Drop for WebcamCapture {
     }
 }
 
-fn luminance(r: u8, g: u8, b: u8) -> u8 {
-    (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32).min(255.0) as u8
-}
-
-fn ascii_for(r: u8, g: u8, b: u8) -> char {
-    let y = luminance(r, g, b) as usize;
-    let idx = (y * (PALETTE.len() - 1)) / 255;
-    PALETTE[idx.min(PALETTE.len() - 1)] as char
-}
-
-fn open_webcam_device(device_spec: &str, format_name: &str, opts: ffmpeg_next::Dictionary) -> Result<ffmpeg_next::format::context::Input> {
+fn open_capture_device(
+    device_spec: &str,
+    format_name: &str,
+    opts: ffmpeg_next::Dictionary,
+) -> Result<ffmpeg_next::format::context::Input> {
     unsafe {
         let format_cstr = CString::new(format_name)?;
         let device_cstr = CString::new(device_spec)?;
@@ -116,38 +130,74 @@ fn open_webcam_device(device_spec: &str, format_name: &str, opts: ffmpeg_next::D
             ffmpeg_sys_next::av_dict_free(&mut options_ptr);
         }
         if ret < 0 {
-            return Err(anyhow!("failed to open webcam device '{}' (code {})", device_spec, ret));
+            return Err(anyhow!(
+                "failed to open capture device '{}' (code {})",
+                device_spec,
+                ret
+            ));
         }
         if ictx_ptr.is_null() {
-            return Err(anyhow!("webcam device '{}' returned null context", device_spec));
+            return Err(anyhow!("capture device '{}' returned null context", device_spec));
         }
         Ok(ffmpeg_next::format::context::Input::wrap(ictx_ptr))
     }
 }
 
-fn capture_loop(config: &WebcamConfig, tx: &Sender<AsciiFrame>, active: &Arc<AtomicBool>) -> Result<()> {
+/// Resolve the (device_spec, format_name, options) triple for the configured
+/// source + OS. Screen capture and camera capture differ only here; everything
+/// downstream (decode -> swscale -> RGB24 -> RgbFrame) is source-agnostic.
+fn resolve_input(config: &WebcamConfig) -> (String, &'static str, ffmpeg_next::Dictionary<'static>) {
+    let mut opts = ffmpeg_next::Dictionary::new();
+    match config.source {
+        CaptureSource::Camera => {
+            if cfg!(target_os = "macos") {
+                opts.set("framerate", &config.fps_cap.to_string());
+                opts.set("pixel_format", "uyvy422");
+                (config.device.clone(), "avfoundation", opts)
+            } else if cfg!(target_os = "linux") {
+                (config.device.clone(), "v4l2", opts)
+            } else {
+                (config.device.clone(), "dshow", opts)
+            }
+        }
+        CaptureSource::Screen => {
+            // Screen sources deliver BGRA-family formats; do NOT force a camera
+            // pixel_format. swscale converts whatever the device reports.
+            if cfg!(target_os = "macos") {
+                // avfoundation exposes each display as "Capture screen N",
+                // indexed AFTER the cameras. Default device "0" here means the
+                // caller didn't override; the app fills in the real screen
+                // index. capture_cursor makes it feel like a share.
+                opts.set("framerate", &config.fps_cap.to_string());
+                opts.set("capture_cursor", "1");
+                (config.device.clone(), "avfoundation", opts)
+            } else if cfg!(target_os = "linux") {
+                opts.set("framerate", &config.fps_cap.to_string());
+                opts.set("draw_mouse", "1");
+                let dev = if config.device == "0" || config.device.is_empty() {
+                    ":0.0".to_string()
+                } else {
+                    config.device.clone()
+                };
+                (dev, "x11grab", opts)
+            } else {
+                opts.set("framerate", &config.fps_cap.to_string());
+                opts.set("draw_mouse", "1");
+                ("desktop".to_string(), "gdigrab", opts)
+            }
+        }
+    }
+}
+
+fn capture_loop(
+    config: &WebcamConfig,
+    tx: &Sender<RgbFrame>,
+    active: &Arc<AtomicBool>,
+) -> Result<()> {
     ffmpeg_next::init()?;
 
-    let (device_spec, format_name) = if cfg!(target_os = "macos") {
-        (config.device.clone(), "avfoundation")
-    } else if cfg!(target_os = "linux") {
-        (config.device.clone(), "v4l2")
-    } else {
-        (config.device.clone(), "dshow")
-    };
-
-    let mut opts = ffmpeg_next::Dictionary::new();
-    if cfg!(target_os = "macos") {
-        opts.set("framerate", &config.fps_cap.to_string());
-        opts.set("pixel_format", "uyvy422");
-    }
-
-    let mut ictx = if !format_name.is_empty() {
-        open_webcam_device(&device_spec, &format_name, opts)?
-    } else {
-        ffmpeg_next::format::input_with_dictionary(&device_spec, opts)
-            .map_err(|e| anyhow!("failed to open webcam '{}': {}", device_spec, e))?
-    };
+    let (device_spec, format_name, opts) = resolve_input(config);
+    let mut ictx = open_capture_device(&device_spec, format_name, opts)?;
 
     let video_stream = ictx
         .streams()
@@ -158,28 +208,21 @@ fn capture_loop(config: &WebcamConfig, tx: &Sender<AsciiFrame>, active: &Arc<Ato
         .context("decoder context")?;
     let mut decoder = dec_ctx.decoder().video().context("video decoder")?;
 
-    // Compute output dimensions that preserve the webcam's native aspect ratio
-    // accounting for terminal cells being ~2x taller than wide.
+    // Output box preserving the source's SQUARE-pixel aspect ratio. The renderer
+    // corrects for terminal-cell aspect, so unlike the old glyph path we do NOT
+    // apply a 2x horizontal stretch here.
     let src_w = decoder.width() as f32;
     let src_h = decoder.height() as f32;
-    let src_aspect = src_w / src_h;
-    // Terminal cell aspect ratio correction: each cell is ~2x tall as it is wide,
-    // so we need ~2x the columns to look right visually.
-    let target_w = config.width as f32;
-    let target_h = config.height as f32;
-    let (out_w, out_h) = {
-        let fit_h = target_h;
-        let fit_w = (fit_h * src_aspect * 2.0).round();
-        if fit_w <= target_w {
-            (fit_w as u32, fit_h as u32)
-        } else {
-            let fit_w = target_w;
-            let fit_h = (fit_w / (src_aspect * 2.0)).round();
-            (fit_w as u32, fit_h as u32)
-        }
-    };
-    let out_w = out_w.max(4);
-    let out_h = out_h.max(4);
+    let src_aspect = if src_h > 0.0 { src_w / src_h } else { 4.0 / 3.0 };
+    let (bw, bh) = (config.width as f32, config.height as f32);
+    let mut out_w = bw;
+    let mut out_h = (out_w / src_aspect).round();
+    if out_h > bh {
+        out_h = bh;
+        out_w = (out_h * src_aspect).round();
+    }
+    let out_w = out_w.max(2.0) as u32;
+    let out_h = out_h.max(2.0) as u32;
 
     let mut scaler = ffmpeg_next::software::scaling::Context::get(
         decoder.format(),
@@ -218,7 +261,7 @@ fn capture_loop(config: &WebcamConfig, tx: &Sender<AsciiFrame>, active: &Arc<Ato
                 thread::sleep(frame_dur - elapsed);
             }
             scaler.run(&decoded, &mut rgb)?;
-            let frame = rgb_to_ascii(&rgb, out_w as u16, out_h as u16);
+            let frame = to_rgb_frame(&rgb, out_w as u16, out_h as u16);
             if tx.send(frame).is_err() {
                 return Ok(());
             }
@@ -227,134 +270,4 @@ fn capture_loop(config: &WebcamConfig, tx: &Sender<AsciiFrame>, active: &Arc<Ato
     }
 
     Ok(())
-}
-
-fn rgb_to_ascii(rgb: &Video, width: u16, height: u16) -> AsciiFrame {
-    let stride = rgb.stride(0);
-    let data = rgb.data(0);
-    let mut cells = Vec::with_capacity(width as usize * height as usize);
-
-    for y in 0..height as usize {
-        let row = &data[y * stride..y * stride + width as usize * 3];
-        for x in 0..width as usize {
-            let i = x * 3;
-            let (r, g, b) = (row[i], row[i + 1], row[i + 2]);
-            cells.push((ascii_for(r, g, b), r, g, b));
-        }
-    }
-
-    AsciiFrame {
-        width,
-        height,
-        cells,
-    }
-}
-
-pub fn ascii_frame_to_ws(frame: &AsciiFrame) -> WsAsciiFrame {
-    let mut ws = WsAsciiFrame::new(frame.width, frame.height);
-    for (i, &(ch, r, g, b)) in frame.cells.iter().enumerate() {
-        let idx = i * 4;
-        if idx + 3 < ws.data.len() {
-            ws.data[idx] = ch as u32;
-            ws.data[idx + 1] = r as u32;
-            ws.data[idx + 2] = g as u32;
-            ws.data[idx + 3] = b as u32;
-        }
-    }
-    ws
-}
-
-/// Decode a wire frame into a renderable [`AsciiFrame`].
-///
-/// Returns `None` for malformed frames (dimensions over the hard caps or a
-/// data buffer whose length does not match `width*height*4`). Validating
-/// BEFORE the allocation is the point: a hostile ~60-byte message claiming
-/// 65535x65535 must never make this function allocate gigabytes (finding #3).
-pub fn ws_frame_to_ascii(ws: &WsAsciiFrame) -> Option<AsciiFrame> {
-    if !ws.is_well_formed() {
-        return None;
-    }
-    let cell_count = ws.width as usize * ws.height as usize;
-    let mut cells = Vec::with_capacity(cell_count);
-    for i in 0..cell_count {
-        let idx = i * 4;
-        cells.push((
-            crate::message::decode_glyph(ws.data[idx]),
-            (ws.data[idx + 1] & 0xff) as u8,
-            (ws.data[idx + 2] & 0xff) as u8,
-            (ws.data[idx + 3] & 0xff) as u8,
-        ));
-    }
-    Some(AsciiFrame {
-        width: ws.width,
-        height: ws.height,
-        cells,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::message::{MAX_FRAME_HEIGHT, MAX_FRAME_WIDTH};
-
-    #[test]
-    fn frame_converters_roundtrip_unicode_glyphs() {
-        let frame = AsciiFrame {
-            width: 3,
-            height: 1,
-            cells: vec![('▀', 255, 0, 0), ('█', 0, 255, 0), ('X', 0, 0, 255)],
-        };
-        let ws = ascii_frame_to_ws(&frame);
-        let back = ws_frame_to_ascii(&ws).expect("well-formed frame decodes");
-        assert_eq!(back.width, 3);
-        assert_eq!(back.height, 1);
-        assert_eq!(back.cells, frame.cells);
-    }
-
-    #[test]
-    fn rejects_wire_buffer_with_mismatched_length() {
-        // short: one cell of data for a claimed two cells
-        let short = WsAsciiFrame {
-            width: 2,
-            height: 1,
-            data: vec!['A' as u32, 9, 9, 9],
-        };
-        assert!(ws_frame_to_ascii(&short).is_none());
-
-        // long: extra trailing words are just as suspect
-        let long = WsAsciiFrame {
-            width: 1,
-            height: 1,
-            data: vec![0; 8],
-        };
-        assert!(ws_frame_to_ascii(&long).is_none());
-    }
-
-    #[test]
-    fn rejects_hostile_dimensions_without_allocating() {
-        // the finding-#3 attack: tiny message, gigantic claimed dimensions.
-        // If validation ran after the allocation this test would OOM/abort.
-        let hostile = WsAsciiFrame {
-            width: 65535,
-            height: 65535,
-            data: vec![],
-        };
-        assert!(ws_frame_to_ascii(&hostile).is_none());
-
-        // just past a single cap is rejected too, even with matching data
-        let too_wide = WsAsciiFrame::new(MAX_FRAME_WIDTH + 1, 1);
-        assert!(ws_frame_to_ascii(&too_wide).is_none());
-        let too_tall = WsAsciiFrame::new(1, MAX_FRAME_HEIGHT + 1);
-        assert!(ws_frame_to_ascii(&too_tall).is_none());
-    }
-
-    #[test]
-    fn accepts_maximum_allowed_dimensions() {
-        let ws = WsAsciiFrame::new(MAX_FRAME_WIDTH, MAX_FRAME_HEIGHT);
-        let back = ws_frame_to_ascii(&ws).expect("cap-sized frame is valid");
-        assert_eq!(
-            back.cells.len(),
-            MAX_FRAME_WIDTH as usize * MAX_FRAME_HEIGHT as usize
-        );
-    }
 }

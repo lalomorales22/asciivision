@@ -7,42 +7,40 @@ use ff::util::frame::video::Video;
 use ffmpeg_next as ff;
 use ratatui::{prelude::*, widgets::Paragraph};
 use std::{
-    cmp::min,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
-const PALETTE: &[u8] = b" .'`^\",:;Il!i><~+_-?][}{1)(|\\tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+use crate::render::{render_frame, RgbFrame, VideoRenderMode};
 
-#[derive(Clone)]
-pub struct AsciiFrame {
-    pub width: u16,
-    pub height: u16,
-    pub cells: Vec<(char, u8, u8, u8)>,
-}
+/// Maximum pixel box a decoder scales a frame into (source aspect preserved).
+/// Generous enough that half-block downscaling into a terminal panel stays
+/// crisp, cheap enough that swscale + copy stays well under the frame budget.
+pub const DECODE_BOX: (u16, u16) = (320, 240);
 
 pub struct VideoPlayer {
     path: PathBuf,
     looping: bool,
-    decode_size: (u16, u16),
-    rx: Receiver<AsciiFrame>,
-    latest: Option<AsciiFrame>,
+    decode_box: (u16, u16),
+    rx: Receiver<RgbFrame>,
+    latest: Option<RgbFrame>,
     finished: Arc<AtomicBool>,
 }
 
 impl VideoPlayer {
-    pub fn new(path: impl Into<PathBuf>, decode_size: (u16, u16), looping: bool) -> Result<Self> {
+    pub fn new(path: impl Into<PathBuf>, decode_box: (u16, u16), looping: bool) -> Result<Self> {
         let path = path.into();
         let finished = Arc::new(AtomicBool::new(false));
-        let rx = spawn_decode(path.as_path(), decode_size, finished.clone())?;
+        let rx = spawn_decode(path.as_path(), decode_box, finished.clone())?;
 
         Ok(Self {
             path,
             looping,
-            decode_size,
+            decode_box,
             rx,
             latest: None,
             finished,
@@ -57,7 +55,7 @@ impl VideoPlayer {
         if self.looping && self.finished.load(Ordering::Relaxed) && self.rx.is_empty() {
             self.finished.store(false, Ordering::Relaxed);
             if let Ok(rx) =
-                spawn_decode(self.path.as_path(), self.decode_size, self.finished.clone())
+                spawn_decode(self.path.as_path(), self.decode_box, self.finished.clone())
             {
                 self.rx = rx;
             }
@@ -68,13 +66,19 @@ impl VideoPlayer {
         self.latest.is_some()
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, intensity: f32) {
-        if area.width < 4 || area.height < 4 {
+    /// Latest decoded frame, if any -- used by the pixel-protocol path which
+    /// needs the raw RGB buffer rather than a cell blit.
+    pub fn latest_frame(&self) -> Option<&RgbFrame> {
+        self.latest.as_ref()
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect, intensity: f32, mode: VideoRenderMode) {
+        if area.width < 2 || area.height < 2 {
             return;
         }
 
-        if let Some(ref ascii) = self.latest {
-            render_ascii(frame.buffer_mut(), area, ascii, intensity);
+        if let Some(ref rgb) = self.latest {
+            render_frame(frame.buffer_mut(), area, rgb, intensity, mode);
         } else {
             let placeholder = Paragraph::new("signal lock pending")
                 .alignment(Alignment::Center)
@@ -84,38 +88,42 @@ impl VideoPlayer {
     }
 }
 
-fn luminance(r: u8, g: u8, b: u8) -> u8 {
-    let value = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
-    value as u8
-}
-
-fn ascii_for(r: u8, g: u8, b: u8) -> char {
-    let y = luminance(r, g, b) as usize;
-    let index = (y * (PALETTE.len() - 1)) / 255;
-    PALETTE[index] as char
-}
-
-fn to_ascii_frame(rgb: &Video) -> AsciiFrame {
-    let width = rgb.width() as usize;
-    let height = rgb.height() as usize;
+/// Copy an FFmpeg RGB24 frame (which may be padded per row via `stride`) into a
+/// tightly-packed [`RgbFrame`]. Shared with the webcam/screen capture path.
+pub(crate) fn to_rgb_frame(rgb: &Video, width: u16, height: u16) -> RgbFrame {
     let stride = rgb.stride(0);
     let data = rgb.data(0);
-    let mut cells = Vec::with_capacity(width * height);
-
-    for y in 0..height {
-        let row = &data[(y * stride) as usize..((y * stride) as usize + width * 3)];
-        for x in 0..width {
-            let index = x * 3;
-            let (r, g, b) = (row[index], row[index + 1], row[index + 2]);
-            cells.push((ascii_for(r, g, b), r, g, b));
+    let row = width as usize * 3;
+    let mut out = vec![0u8; row * height as usize];
+    for y in 0..height as usize {
+        let src = y * stride;
+        // guard against a short final row from odd stride math
+        if src + row <= data.len() {
+            out[y * row..y * row + row].copy_from_slice(&data[src..src + row]);
         }
     }
-
-    AsciiFrame {
-        width: width as u16,
-        height: height as u16,
-        cells,
+    RgbFrame {
+        width,
+        height,
+        data: out,
     }
+}
+
+/// Fit `(src_w, src_h)` square pixels into the `(max_w, max_h)` box, preserving
+/// aspect ratio, so the decoded [`RgbFrame`] never carries a squished frame --
+/// the renderer letterboxes from correct source dimensions.
+fn fit_box(src_w: u32, src_h: u32, max: (u16, u16)) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 {
+        return ((max.0.max(2)) as u32, (max.1.max(2)) as u32);
+    }
+    let aspect = src_w as f32 / src_h as f32;
+    let mut w = max.0 as f32;
+    let mut h = (w / aspect).round();
+    if h > max.1 as f32 {
+        h = max.1 as f32;
+        w = (h * aspect).round();
+    }
+    (w.max(2.0) as u32, h.max(2.0) as u32)
 }
 
 fn open_decoder(
@@ -171,83 +179,108 @@ fn build_scaler(
 
 fn spawn_decode(
     path: &Path,
-    decode_size: (u16, u16),
+    decode_box: (u16, u16),
     finished: Arc<AtomicBool>,
-) -> Result<Receiver<AsciiFrame>> {
+) -> Result<Receiver<RgbFrame>> {
     let path = path.to_path_buf();
     let (tx, rx) = bounded(8);
-    let (target_width, target_height) = decode_size;
 
     std::thread::spawn(move || {
         let _result: Result<()> = (|| {
-        let (mut input, video_index, mut decoder, (src_width, src_height), _) =
-            open_decoder(path.as_path())?;
-        let mut scaler = build_scaler(
-            decoder.format(),
-            src_width,
-            src_height,
-            target_width as u32,
-            target_height as u32,
-        )?;
-        let mut rgb = Video::new(Pixel::RGB24, target_width as u32, target_height as u32);
-        let mut decoded = Video::empty();
+            let (mut input, video_index, mut decoder, (src_width, src_height), fps) =
+                open_decoder(path.as_path())?;
+            let (out_w, out_h) = fit_box(src_width, src_height, decode_box);
+            let mut scaler = build_scaler(decoder.format(), src_width, src_height, out_w, out_h)?;
+            let mut rgb = Video::new(Pixel::RGB24, out_w, out_h);
+            let mut decoded = Video::empty();
 
-        for (stream, packet) in input.packets() {
-            if stream.index() != video_index {
-                continue;
-            }
+            // Wall-clock pacing at the source frame rate (avg_frame_rate; 30fps
+            // fallback). Without this the decoder emits as fast as it can and
+            // clips play too fast / stutter -- the single most "this looks
+            // broken" video bug. Frame N is released at start + N/fps.
+            let interval = fps
+                .filter(|(n, d)| *n > 0 && *d > 0)
+                .map(|(n, d)| d as f64 / n as f64)
+                .filter(|s| s.is_finite() && *s > 0.0)
+                .unwrap_or(1.0 / 30.0);
+            let start = Instant::now();
+            let mut frame_idx: u64 = 0;
 
-            decoder.send_packet(&packet)?;
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                scaler.run(&decoded, &mut rgb)?;
-                if tx.send(to_ascii_frame(&rgb)).is_err() {
-                    return Ok(());
+            for (stream, packet) in input.packets() {
+                if stream.index() != video_index {
+                    continue;
+                }
+                decoder.send_packet(&packet)?;
+                while decoder.receive_frame(&mut decoded).is_ok() {
+                    scaler.run(&decoded, &mut rgb)?;
+                    let target = start + Duration::from_secs_f64(frame_idx as f64 * interval);
+                    let now = Instant::now();
+                    if target > now {
+                        std::thread::sleep(target - now);
+                    }
+                    frame_idx += 1;
+                    if tx.send(to_rgb_frame(&rgb, out_w as u16, out_h as u16)).is_err() {
+                        return Ok(());
+                    }
                 }
             }
-        }
 
-        decoder.send_eof()?;
-        while decoder.receive_frame(&mut decoded).is_ok() {
-            scaler.run(&decoded, &mut rgb)?;
-            let _ = tx.send(to_ascii_frame(&rgb));
-        }
+            decoder.send_eof()?;
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                scaler.run(&decoded, &mut rgb)?;
+                let target = start + Duration::from_secs_f64(frame_idx as f64 * interval);
+                let now = Instant::now();
+                if target > now {
+                    std::thread::sleep(target - now);
+                }
+                frame_idx += 1;
+                let _ = tx.send(to_rgb_frame(&rgb, out_w as u16, out_h as u16));
+            }
 
-        finished.store(true, Ordering::Relaxed);
-        Ok(())
-        })(); // end inner closure -- errors are silently swallowed, never printed to stderr
+            finished.store(true, Ordering::Relaxed);
+            Ok(())
+        })(); // inner closure -- decode errors are swallowed, never printed to stderr
     });
 
     Ok(rx)
 }
 
-fn render_ascii(buffer: &mut Buffer, area: Rect, ascii: &AsciiFrame, intensity: f32) {
-    let content_width = min(ascii.width, area.width);
-    let content_height = min(ascii.height, area.height);
-    let offset_x = area.x + (area.width - content_width) / 2;
-    let offset_y = area.y + (area.height - content_height) / 2;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for y in 0..content_height {
-        for x in 0..content_width {
-            let index = y as usize * ascii.width as usize + x as usize;
-            let (glyph, r, g, b) = ascii.cells[index];
-            let scanline = if y % 2 == 0 { 0.84 } else { 1.0 };
-            let factor = (intensity * scanline).clamp(0.1, 1.2);
-            let fg = scale_rgb(r, g, b, factor);
-            let bg = scale_rgb(r, g, b, factor * 0.16);
-
-            if let Some(cell) = buffer.cell_mut((offset_x + x, offset_y + y)) {
-                cell.set_char(glyph);
-                cell.set_fg(fg);
-                cell.set_bg(bg);
-            }
-        }
+    #[test]
+    fn fit_box_preserves_aspect_within_bounds() {
+        // 16:9 source into a 320x240 box -> width-limited, aspect held
+        let (w, h) = fit_box(1920, 1080, (320, 240));
+        assert!(w <= 320 && h <= 240);
+        assert!(((w as f32 / h as f32) - (1920.0 / 1080.0)).abs() < 0.05);
     }
-}
 
-fn scale_rgb(r: u8, g: u8, b: u8, factor: f32) -> Color {
-    Color::Rgb(
-        (r as f32 * factor).clamp(0.0, 255.0) as u8,
-        (g as f32 * factor).clamp(0.0, 255.0) as u8,
-        (b as f32 * factor).clamp(0.0, 255.0) as u8,
-    )
+    /// End-to-end: the bundled demo file must decode into valid, paced
+    /// RgbFrames. Asset-optional so the suite still passes without the file.
+    #[test]
+    fn decodes_demo_file_into_rgb_frames() {
+        let path = std::path::Path::new("demo-videos/demo.mp4");
+        if !path.exists() {
+            return;
+        }
+        let mut player = match VideoPlayer::new(path, DECODE_BOX, false) {
+            Ok(p) => p,
+            Err(_) => return, // no usable ffmpeg/codec here -> skip
+        };
+        let mut got = false;
+        for _ in 0..400 {
+            player.tick();
+            if let Some(f) = player.latest_frame() {
+                assert!(f.is_valid(), "decoded frame must be structurally valid");
+                assert!(f.width >= 2 && f.height >= 2);
+                assert_eq!(f.data.len(), f.width as usize * f.height as usize * 3);
+                got = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(got, "no frame decoded from demo.mp4 within timeout");
+    }
 }

@@ -17,6 +17,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use rayon::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Vec3
@@ -491,35 +492,56 @@ fn pixel_uv(px: f32, py: f32, w: f32, h_px: f32) -> (f32, f32) {
 pub fn run_half_block(
     buffer: &mut Buffer,
     area: Rect,
-    mut f: impl FnMut(f32, f32) -> (f32, f32, f32),
+    f: impl Fn(f32, f32) -> (f32, f32, f32) + Sync,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let w = area.width as f32;
+    let w = area.width as usize;
+    let w_f = area.width as f32;
     let h_px = (area.height as f32) * 2.0;
-    for cy in 0..area.height {
+    let total = w * area.height as usize;
+
+    // The per-pixel shader (SDF ray marching) is by far the expensive part, so
+    // fan it out across cores into a color buffer; the cheap cell writes stay
+    // serial. Small panels skip rayon's overhead.
+    let shade_cell = |i: usize| -> (Color, Color) {
+        let cx = i % w;
+        let cy = i / w;
+        let px = cx as f32 + 0.5;
         let py_top = (cy as f32) * 2.0 + 0.5;
-        let py_bot = py_top + 1.0;
-        for cx in 0..area.width {
-            let px = cx as f32 + 0.5;
-            let (u_t, v_t) = pixel_uv(px, py_top, w, h_px);
-            let (u_b, v_b) = pixel_uv(px, py_bot, w, h_px);
-            let top = f(u_t, v_t);
-            let bot = f(u_b, v_b);
-            if let Some(cell) = buffer.cell_mut((area.x + cx, area.y + cy)) {
-                cell.set_char(HALF_BLOCK);
-                cell.set_fg(Color::Rgb(
-                    (clamp01(top.0) * 255.0) as u8,
-                    (clamp01(top.1) * 255.0) as u8,
-                    (clamp01(top.2) * 255.0) as u8,
-                ));
-                cell.set_bg(Color::Rgb(
-                    (clamp01(bot.0) * 255.0) as u8,
-                    (clamp01(bot.1) * 255.0) as u8,
-                    (clamp01(bot.2) * 255.0) as u8,
-                ));
-            }
+        let (u_t, v_t) = pixel_uv(px, py_top, w_f, h_px);
+        let (u_b, v_b) = pixel_uv(px, py_top + 1.0, w_f, h_px);
+        let top = f(u_t, v_t);
+        let bot = f(u_b, v_b);
+        (
+            Color::Rgb(
+                (clamp01(top.0) * 255.0) as u8,
+                (clamp01(top.1) * 255.0) as u8,
+                (clamp01(top.2) * 255.0) as u8,
+            ),
+            Color::Rgb(
+                (clamp01(bot.0) * 255.0) as u8,
+                (clamp01(bot.1) * 255.0) as u8,
+                (clamp01(bot.2) * 255.0) as u8,
+            ),
+        )
+    };
+
+    const PAR_THRESHOLD: usize = 1024;
+    let colors: Vec<(Color, Color)> = if total >= PAR_THRESHOLD {
+        (0..total).into_par_iter().map(shade_cell).collect()
+    } else {
+        (0..total).map(shade_cell).collect()
+    };
+
+    for (i, (fg, bg)) in colors.into_iter().enumerate() {
+        let cx = (i % w) as u16;
+        let cy = (i / w) as u16;
+        if let Some(cell) = buffer.cell_mut((area.x + cx, area.y + cy)) {
+            cell.set_char(HALF_BLOCK);
+            cell.set_fg(fg);
+            cell.set_bg(bg);
         }
     }
 }

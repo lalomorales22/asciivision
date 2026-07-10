@@ -23,6 +23,8 @@ pub enum CommandId {
     Pin,
     Unpin,
     Video,
+    VideoMode,
+    Screenshare,
     Youtube,
     Webcam,
     Effects,
@@ -163,6 +165,8 @@ pub const REGISTRY: &[CommandSpec] = &[
     spec!(Youtube, "/youtube", &[], "/youtube <url>", "stream a YouTube video into the ASCII video bus", VideoCamera, Required, true),
     spec!(Webcam, "/webcam", &[], "/webcam", "toggle the live ASCII webcam feed (same as F5)", VideoCamera, None, true),
     spec!(Video, "/video", &[], "/video", "toggle the video bus panel (same as F3)", VideoCamera, None, false),
+    spec!(VideoMode, "/vmode", &["/videomode"], "/vmode", "cycle video fidelity: ascii glyphs, half-block (2x res), or true pixels", VideoCamera, None, true),
+    spec!(Screenshare, "/screenshare", &["/share", "/screen"], "/screenshare", "share your desktop into the room as live ASCII (or preview it locally)", VideoCamera, None, true),
     // --- ai & agent ---
     spec!(Provider, "/provider", &[], "/provider <name>", "switch AI provider: claude, grok, gpt, gemini, ollama", AiAgent, Required, true),
     spec!(Ollama, "/ollama", &[], "/ollama", "switch to local Ollama and open the model picker", AiAgent, None, false),
