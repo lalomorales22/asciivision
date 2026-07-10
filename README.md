@@ -18,6 +18,7 @@ ASCIIVision is a single Rust binary that packs an absurd amount of functionality
 - **Live Webcam** -- your camera feed converted to ASCII art in real-time, with error reporting when the device is busy
 - **Command Palette** -- Ctrl+P fuzzy-searches every command, effect, game, layout, and AI provider; Enter executes it
 - **WebSocket Video Chat with Room Codes** -- `/host` starts a room and prints a short code; a friend types `/join <code>` -- no URLs, no IP hunting
+- **Browser Studio** -- `/studio` launches a paired web experience served straight from the terminal: real **WebRTC** two-way video, **screen sharing**, **face-tracked AR hats** (MediaPipe, composited into your outgoing video), a **three.js** WebGL scene, and chat. Browser peers and terminal peers share the same room via the built-in WebSocket hub as the WebRTC signaling server
 - **Ray-Marched Terminal Graphics** -- SDF ray marching with real lighting (key/fill/specular/fresnel/fog/gamma) rendered in half-block subpixels: Torus Knot, Metaballs, Tunnel, Synthwave grid, Julia set, plus the classic six (matrix rain, plasma, starfield, wireframe cube, fire, particles)
 - **Tiles Window** -- real PTY-backed embedded terminals for Codex, Claude, Gemini, shells, and any other CLI app, in 1-8 way grids
 - **Hyprland-Style Tiling** -- move, swap, resize, and reassign panels with Ctrl+hjkl keybindings and 8 layout presets
@@ -217,6 +218,7 @@ The focused tile is highlighted with a double border.
 | `/host [port]` | Host a video chat room and print a shareable room code (default port 9999) |
 | `/join <code>` | Join a friend's room by its short code |
 | `/invite` | Re-print the room code and join instructions |
+| `/studio` | Open the browser studio (WebRTC video + screen share + AR hats + three.js), sharing this room |
 | `/disconnect` | Leave the current video chat room |
 | `/analytics` | Show analytics in focused tile |
 | `/games` | Show the games panel in the focused tile |
@@ -360,6 +362,17 @@ Multi-user live ASCII webcam streaming in the terminal. The easy way:
 ```
 
 That's it -- `/host` starts the server, connects you to it, applies the Video Chat layout, and prints the code (codes are case- and dash-insensitive). `/invite` re-prints it, `/disconnect` leaves. Set your name with `/username <name>` before joining.
+
+### Browser Studio
+
+Once you're in a room, `/studio` prints a `http://<lan-ip>:<port>` URL and serves a self-contained web app straight from the terminal binary. Open it in a browser (Chrome/Safari/Firefox) -- or share the URL with anyone on your network -- for the full-fidelity experience the terminal can't do natively:
+
+- **Real WebRTC two-way video** -- peer-to-peer, HD, low latency (STUN for NAT traversal); the mesh uses perfect-negotiation so any peer can join or enable its camera at any time
+- **Screen sharing** -- `getDisplayMedia`, sent as a real track to peers
+- **Face-tracked AR hats** -- MediaPipe FaceLandmarker places a hat on your head and composites it *into your outgoing video*, so peers see it too; tap the hat button to cycle styles
+- **three.js WebGL background** and a live chat + roster synced with the terminal room
+
+The browser page uses ASCIIVision's existing WebSocket hub purely as the WebRTC **signaling** server, so a terminal user (ASCII feeds) and a browser user (WebRTC + three.js) can be in the exact same room. The terminal stays the star; the browser is the optional "studio mode" for when you want real pixels and AR.
 
 The manual way still works for cross-network or scripted setups:
 

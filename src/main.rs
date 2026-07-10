@@ -37,6 +37,7 @@ mod roomcode;
 mod server;
 mod shader;
 mod shell;
+mod studio;
 mod sysmon;
 mod theme;
 mod tiling;
@@ -300,6 +301,8 @@ struct App {
     /// hosted video chat server handle, if this instance is hosting
     chat_server: Option<Arc<VideoChatServer>>,
     chat_server_port: Option<u16>,
+    /// browser studio HTTP server (three.js + WebRTC), started by /studio
+    studio: Option<studio::StudioServer>,
     /// games<->network glue: outbound channel handed to GamesPanel while a
     /// video chat connection is live (games push, tick() forwards to the wire)
     game_net_tx: Option<mpsc::UnboundedSender<(String, serde_json::Value)>>,
@@ -504,6 +507,7 @@ impl App {
             video_chat: None,
             chat_server: None,
             chat_server_port: None,
+            studio: None,
             game_net_tx: None,
             game_net_rx: None,
             game_net_my_id: None,
@@ -1722,6 +1726,9 @@ impl App {
             CommandId::Mute => {
                 self.toggle_mute();
             }
+            CommandId::Studio => {
+                self.launch_studio();
+            }
             CommandId::Youtube => {
                 let url = args.to_string();
                 if url.is_empty() {
@@ -2375,6 +2382,54 @@ impl App {
         if let Some(a) = &self.audio {
             a.set_muted(self.audio_muted);
         }
+    }
+
+    /// Launch the browser studio (WebRTC + three.js + AR hats), served from a
+    /// local HTTP port and signaling through the CURRENT room's hub.
+    fn launch_studio(&mut self) {
+        let ws_url = match &self.video_chat {
+            Some(vc) if vc.is_connected() => vc.server_url.clone(),
+            _ => {
+                self.add_system_message(
+                    "start or join a room first (/host or /join), then /studio for the browser experience",
+                );
+                return;
+            }
+        };
+        let addr = match roomcode::parse_ws_url(&ws_url) {
+            Some(a) => a,
+            None => {
+                self.add_system_message("couldn't derive the studio address from the room url");
+                return;
+            }
+        };
+        let ws_port = addr.port();
+        let ip = *addr.ip();
+        // browsers need a reachable host: swap loopback/unspecified for the LAN ip
+        let host = if ip.is_loopback() || ip.is_unspecified() {
+            roomcode::lan_ip()
+        } else {
+            ip
+        };
+        let http_port = ws_port.checked_add(1).unwrap_or(ws_port - 1);
+        let inject_ws = format!("ws://{}:{}", host, ws_port);
+        if self.studio.is_none() {
+            match studio::StudioServer::start(http_port, &inject_ws) {
+                Ok(s) => self.studio = Some(s),
+                Err(e) => {
+                    self.add_system_message(format!("studio server failed: {}", e));
+                    return;
+                }
+            }
+        }
+        let port = self.studio.as_ref().map(|s| s.port()).unwrap_or(http_port);
+        let url = format!("http://{}:{}/", host, port);
+        self.add_system_message(format!("STUDIO live -> open in a browser: {}", url));
+        self.add_system_message(
+            "  three.js + WebRTC 2-way video + screen share + AR hats; browser & terminal peers share this room"
+                .to_string(),
+        );
+        self.status_note = format!("studio: {}", url);
     }
 
     /// Toggle audio mute (persists across video reloads + loops).

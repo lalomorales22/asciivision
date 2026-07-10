@@ -85,8 +85,7 @@
 
 <script type="module">
 // ---- config injected by the Rust server ----
-const WS_PORT = "__WS_PORT__";
-const WS_URL = `ws://${location.hostname}:${WS_PORT}`;
+const WS_URL = "__WS_URL__"; // the room's signaling hub (ws://host:port)
 const PROTOCOL_VERSION = 3;
 const USERNAME = "studio-" + Math.floor(1000 + Math.random() * 9000);
 const ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
