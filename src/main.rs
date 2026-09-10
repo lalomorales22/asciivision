@@ -83,7 +83,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/analytics", "conversation analytics in the focused tile"),
     ("/sysmon", "system monitor in the focused tile"),
     ("/games", "arcade panel"),
-    ("/games ", "games pacman|space|caves|tetris|play|menu"),
+    ("/games ", "games pacman|space|caves|tetris|arena|play|menu"),
     ("/tiles", "boot 2 live PTY terminals"),
     ("/tiles ", "boot 1-8 live PTY terminals"),
     ("/layout", "cycle layout preset"),
@@ -563,7 +563,7 @@ impl App {
             "video chat: /server <port> to host, /connect ws://<addr> to join, /chat <msg> to send"
         );
         app.add_system_message(
-            "arcade bay online: /games loads it, 1-4 launches a game, WASD/Space play, P pauses, high scores persist"
+            "arcade bay online: /games loads it, 1-5 launches a game (5 = multiplayer Ice Arena over the chat room), P pauses, high scores persist"
         );
         app.add_system_message(
             "tiles online: /tiles or F7 boots live PTY terminals // /tiles 4 for a 2x2 shell grid"
@@ -1193,6 +1193,7 @@ impl App {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last_tick);
         self.last_tick = now;
+        self.games.set_net(self.video_chat.as_ref().map(|vc| vc.game_handle()));
         self.games.tick(elapsed.as_secs_f32());
         let tick_factor = ((elapsed.as_secs_f32() / 0.016).ceil() as usize).max(1);
 
@@ -1921,7 +1922,7 @@ impl App {
                         self.status_note = self.games.status_note().to_string();
                     } else {
                         self.add_system_message(
-                            "games: /games, /games play, /games menu, /games next, /games pacman|space|caves|tetris",
+                            "games: /games, /games play, /games menu, /games next, /games pacman|space|caves|tetris|arena",
                         );
                     }
                 }
@@ -3596,7 +3597,7 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("GAMES      ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/games loads the arcade bay; 1-4 launches Pac-Man, Space Invaders, Penguin Ice Caves, or Blockdrop (Tetris); P pauses", Style::default().fg(t().text)),
+                Span::styled("/games loads the arcade bay; 1-5 launches Pac-Man, Space Invaders, Penguin Ice Caves, Blockdrop, or Ice Arena (multiplayer FPS: host with H, others press J, S for solo vs bots)", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
                 Span::styled("TILES      ", Style::default().fg(t().accent2).bold()),
@@ -3641,7 +3642,7 @@ impl App {
             Line::from("  Ctrl+[/]  resize focused split narrower/wider"),
             Line::from("  Ctrl+n    cycle focused tile to next panel type"),
             Line::from("  /layout  cycle layout (default, dual, triple, quad, webcam, focus)"),
-            Line::from("  Games     focus arcade tile and use 1-4 / WASD / Space / P pause / R restart / Esc"),
+            Line::from("  Games     focus arcade tile and use 1-5 / WASD / Space / P pause / R restart / Esc"),
             Line::from("  Tiles     focus PTY tile and type directly; Ctrl+j/k cycle inner terminals, Ctrl+h/l move app focus"),
             Line::from(""),
             Line::from(Span::styled("Modules", Style::default().fg(t().accent4).bold())),
@@ -3650,7 +3651,7 @@ impl App {
             Line::from("  Video Chat: WebSocket multi-user streaming"),
             Line::from("  3D FX: matrix, plasma, starfield, wireframe, fire, particles, theme solid"),
             Line::from("  Art: 17 procedural generators (fractals, automata, L-systems, attractors, 3D solids)"),
-            Line::from("  Games: Pac-Man, Space Invaders, Penguin Ice Caves (raycast 3D), Blockdrop"),
+            Line::from("  Games: Pac-Man, Space Invaders, Penguin Ice Caves (raycast 3D), Blockdrop, Ice Arena (multiplayer FPS)"),
             Line::from("  Tiles: 1-8 live PTY terminals for codex / claude / gemini / shell work"),
             Line::from("  Sys Monitor: CPU, memory, swap, network, load average"),
             Line::from("  Analytics: Real-time conversation statistics"),

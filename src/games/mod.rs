@@ -4,9 +4,11 @@
 //! back buffer, and a particle system); each game is its own module and
 //! implements the `Game` trait.
 
+mod arena;
 mod caves;
 mod invaders;
 mod pacman;
+mod raycast;
 mod tetris;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -17,6 +19,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
+use crate::client::NetHandle;
 use crate::theme::{color_to_rgb, t};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,10 +28,11 @@ pub enum GameKind {
     SpaceInvaders,
     IceCaves,
     Tetris,
+    Arena,
 }
 
 impl GameKind {
-    pub const ALL: [Self; 4] = [Self::PacMan, Self::SpaceInvaders, Self::IceCaves, Self::Tetris];
+    pub const ALL: [Self; 5] = [Self::PacMan, Self::SpaceInvaders, Self::IceCaves, Self::Tetris, Self::Arena];
 
     pub fn index(self) -> usize {
         match self {
@@ -36,6 +40,7 @@ impl GameKind {
             Self::SpaceInvaders => 1,
             Self::IceCaves => 2,
             Self::Tetris => 3,
+            Self::Arena => 4,
         }
     }
 
@@ -45,6 +50,7 @@ impl GameKind {
             Self::SpaceInvaders => "SPACE INVADERS",
             Self::IceCaves => "PENGUIN ICE CAVES",
             Self::Tetris => "BLOCKDROP",
+            Self::Arena => "ICE ARENA",
         }
     }
 
@@ -54,6 +60,7 @@ impl GameKind {
             Self::SpaceInvaders => "invaders",
             Self::IceCaves => "caves",
             Self::Tetris => "tetris",
+            Self::Arena => "arena",
         }
     }
 
@@ -63,6 +70,7 @@ impl GameKind {
             Self::SpaceInvaders => "animated squadrons, bunkers, mystery UFO, explosions",
             Self::IceCaves => "first-person raycast caves: collect fish, dodge seals",
             Self::Tetris => "hold, ghost piece, hard drop, line-clear fireworks",
+            Self::Arena => "multiplayer first-person snowball deathmatch over the video chat room",
         }
     }
 
@@ -72,6 +80,7 @@ impl GameKind {
             Self::SpaceInvaders => "A/D move  W/Space fire  S shield",
             Self::IceCaves => "W/S move  A/D turn  Q/E strafe",
             Self::Tetris => "A/D move  W rotate  S soft  Space drop  C hold",
+            Self::Arena => "W/S move  A/D turn  Q/E strafe  Space throw",
         }
     }
 
@@ -83,6 +92,7 @@ impl GameKind {
             }
             "3" | "penguin" | "3d" | "caves" | "icecaves" | "ice-caves" | "peng" => Some(Self::IceCaves),
             "4" | "tetris" | "blocks" | "blockdrop" => Some(Self::Tetris),
+            "5" | "arena" | "deathmatch" | "fps" | "snowball" | "multiplayer" => Some(Self::Arena),
             _ => None,
         }
     }
@@ -105,6 +115,8 @@ pub(crate) trait Game {
     fn render(&self, grid: &mut CellGrid, phase: f32);
     fn score(&self) -> u32;
     fn is_over(&self) -> bool;
+    /// Called every tick with the room's network handle, if connected.
+    fn set_net(&mut self, _net: Option<NetHandle>) {}
 }
 
 fn new_game(kind: GameKind) -> Box<dyn Game> {
@@ -113,6 +125,7 @@ fn new_game(kind: GameKind) -> Box<dyn Game> {
         GameKind::SpaceInvaders => Box::new(invaders::InvadersGame::new()),
         GameKind::IceCaves => Box::new(caves::CavesGame::new()),
         GameKind::Tetris => Box::new(tetris::TetrisGame::new()),
+        GameKind::Arena => Box::new(arena::ArenaGame::new()),
     }
 }
 
@@ -181,6 +194,7 @@ pub struct GamesPanel {
     new_record: bool,
     menu_particles: Particles,
     menu_time: f32,
+    net: Option<NetHandle>,
 }
 
 impl GamesPanel {
@@ -195,7 +209,13 @@ impl GamesPanel {
             new_record: false,
             menu_particles: Particles::default(),
             menu_time: 0.0,
+            net: None,
         }
+    }
+
+    /// Hand the room's network handle to the panel (and the running game).
+    pub fn set_net(&mut self, net: Option<NetHandle>) {
+        self.net = net;
     }
 
     pub fn status_note(&self) -> &str {
@@ -256,6 +276,7 @@ impl GamesPanel {
             return;
         }
         if let Some(session) = &mut self.session {
+            session.set_net(self.net.clone());
             session.tick(dt);
         }
         let over = self.session.as_ref().map(|s| s.is_over()).unwrap_or(false);
@@ -401,7 +422,7 @@ impl GamesPanel {
             " █▀█ █▀▄ █▄▄ █▀█ █▄▀ ██▄   █▄█ █▀█  █ ",
         ];
         let logo_w = logo[0].chars().count() as i32;
-        let compact = w < logo_w + 2 || h < 16;
+        let compact = w < logo_w + 2 || h < 24;
         let mut y = 1;
         if !compact {
             let hue_shift = (phase * 40.0) % 360.0;
@@ -420,7 +441,7 @@ impl GamesPanel {
         }
 
         let hint = if is_focused {
-            "Up/Down or 1-4 pick  //  Enter play  //  in game: P pause, R restart, Esc menu"
+            "Up/Down or 1-5 pick  //  Enter play  //  in game: P pause, R restart, Esc menu"
         } else {
             "focus this tile (Ctrl+h/j/k/l or F8) to play"
         };
@@ -459,6 +480,7 @@ fn key_to_selection(code: KeyCode) -> Option<GameKind> {
         KeyCode::Char('2') => Some(GameKind::SpaceInvaders),
         KeyCode::Char('3') => Some(GameKind::IceCaves),
         KeyCode::Char('4') => Some(GameKind::Tetris),
+        KeyCode::Char('5') => Some(GameKind::Arena),
         _ => None,
     }
 }
@@ -512,6 +534,11 @@ impl CellGrid {
         }
     }
 
+
+    #[cfg(test)]
+    pub fn get_char(&self, x: i32, y: i32) -> char {
+        self.index(x, y).map(|i| self.cells[i].ch).unwrap_or(' ')
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, ch: char, fg: Color, bg: Color) {

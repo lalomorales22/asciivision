@@ -1,13 +1,46 @@
-use crate::message::WsMessage;
+use crate::message::{GameMsg, WsMessage};
 use crate::video::AsciiFrame;
 use crate::webcam::{ascii_frame_to_ws, ws_frame_to_ascii};
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
+
+/// Everything a game needs to talk to the room: send game messages and
+/// drain the ones that arrived. Cheap to clone (all Arcs).
+#[derive(Clone)]
+pub struct NetHandle {
+    pub username: String,
+    my_id: Arc<RwLock<Option<String>>>,
+    connected: Arc<RwLock<bool>>,
+    tx: mpsc::UnboundedSender<GameMsg>,
+    inbox: Arc<RwLock<VecDeque<(String, GameMsg)>>>,
+}
+
+impl NetHandle {
+    pub fn my_id(&self) -> Option<String> {
+        self.my_id.read().clone()
+    }
+
+    pub fn is_connected(&self) -> bool {
+        *self.connected.read() && self.my_id.read().is_some()
+    }
+
+    pub fn send(&self, msg: GameMsg) {
+        netlog(&format!("handle.send {:?}", std::mem::discriminant(&msg)));
+        if self.tx.send(msg).is_err() {
+            netlog("handle.send: receiver gone");
+        }
+    }
+
+    /// Take every game message received since the last drain, oldest first.
+    pub fn drain(&self) -> Vec<(String, GameMsg)> {
+        self.inbox.write().drain(..).collect()
+    }
+}
 
 pub struct VideoChatClient {
     pub username: String,
@@ -21,12 +54,17 @@ pub struct VideoChatClient {
     chat_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
     frame_tx: mpsc::UnboundedSender<AsciiFrame>,
     frame_rx: Arc<Mutex<mpsc::UnboundedReceiver<AsciiFrame>>>,
+    my_id: Arc<RwLock<Option<String>>>,
+    game_tx: mpsc::UnboundedSender<GameMsg>,
+    game_rx: Arc<Mutex<mpsc::UnboundedReceiver<GameMsg>>>,
+    game_inbox: Arc<RwLock<VecDeque<(String, GameMsg)>>>,
 }
 
 impl VideoChatClient {
     pub fn new(username: String, server_url: String) -> Self {
         let (chat_tx, chat_rx) = mpsc::unbounded_channel();
         let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+        let (game_tx, game_rx) = mpsc::unbounded_channel();
         Self {
             username,
             server_url,
@@ -39,6 +77,20 @@ impl VideoChatClient {
             chat_rx: Arc::new(Mutex::new(chat_rx)),
             frame_tx,
             frame_rx: Arc::new(Mutex::new(frame_rx)),
+            my_id: Arc::new(RwLock::new(None)),
+            game_tx,
+            game_rx: Arc::new(Mutex::new(game_rx)),
+            game_inbox: Arc::new(RwLock::new(VecDeque::new())),
+        }
+    }
+
+    pub fn game_handle(&self) -> NetHandle {
+        NetHandle {
+            username: self.username.clone(),
+            my_id: Arc::clone(&self.my_id),
+            connected: Arc::clone(&self.connected),
+            tx: self.game_tx.clone(),
+            inbox: Arc::clone(&self.game_inbox),
         }
     }
 
@@ -76,6 +128,9 @@ impl VideoChatClient {
         let status = Arc::clone(&self.status);
         let chat_rx = Arc::clone(&self.chat_rx);
         let frame_rx = Arc::clone(&self.frame_rx);
+        let my_id = Arc::clone(&self.my_id);
+        let game_rx = Arc::clone(&self.game_rx);
+        let game_inbox = Arc::clone(&self.game_inbox);
 
         async move {
             *status.write() = format!("connecting to {}", server_url);
@@ -111,6 +166,16 @@ impl VideoChatClient {
                                 match msg {
                                     WsMessage::Ack { message, .. } => {
                                         *status_rx.write() = message;
+                                    }
+                                    WsMessage::Welcome { user_id } => {
+                                        *my_id.write() = Some(user_id);
+                                    }
+                                    WsMessage::Game { user_id, payload } => {
+                                        let mut inbox = game_inbox.write();
+                                        inbox.push_back((user_id, payload));
+                                        while inbox.len() > 512 {
+                                            inbox.pop_front();
+                                        }
                                     }
                                     WsMessage::UserList(users) => {
                                         let mut guard = connected_users_rx.write();
@@ -192,6 +257,25 @@ impl VideoChatClient {
                 }
             });
 
+            // -- game send task --
+            let ws_tx_game = Arc::clone(&ws_tx);
+            tokio::spawn(async move {
+                netlog("game send task: waiting for receiver lock");
+                let mut rx = game_rx.lock().await;
+                netlog("game send task: running");
+                while let Some(payload) = rx.recv().await {
+                    let msg = WsMessage::Game { user_id: String::new(), payload };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let mut tx = ws_tx_game.lock().await;
+                        if tx.send(TungsteniteMsg::Text(json)).await.is_err() {
+                            netlog("game send task: socket write failed");
+                            break;
+                        }
+                    }
+                }
+                netlog("game send task: ended");
+            });
+
             // -- chat send task --
             let ws_tx_chat = Arc::clone(&ws_tx);
             let username_chat = username.clone();
@@ -212,6 +296,16 @@ impl VideoChatClient {
             });
 
             Ok(())
+        }
+    }
+}
+
+/// Debug trace of the game transport, enabled by ASCIIVISION_NETLOG=<file>.
+fn netlog(line: &str) {
+    if let Ok(path) = std::env::var("ASCIIVISION_NETLOG") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{} {}", chrono::Utc::now().format("%H:%M:%S%.3f"), line);
         }
     }
 }

@@ -64,6 +64,8 @@ impl VideoChatServer {
                                             message: format!("welcome, {}!", username),
                                         };
                                         let _ = ws_tx.send(TungsteniteMsg::Text(serde_json::to_string(&ack)?)).await;
+                                        let welcome = WsMessage::Welcome { user_id: id.clone() };
+                                        let _ = ws_tx.send(TungsteniteMsg::Text(serde_json::to_string(&welcome)?)).await;
                                         self.broadcast_user_list()?;
                                         self.broadcast_except(&WsMessage::UserJoined {
                                             user_id: id,
@@ -87,6 +89,14 @@ impl VideoChatServer {
                                                 user_id: uid.clone(),
                                                 username: uname,
                                                 content,
+                                            })?;
+                                        }
+                                    }
+                                    WsMessage::Game { payload, .. } => {
+                                        if let Some(ref uid) = user_id {
+                                            self.broadcast_all(&WsMessage::Game {
+                                                user_id: uid.clone(),
+                                                payload,
                                             })?;
                                         }
                                     }
