@@ -6,6 +6,7 @@
 
 mod arena;
 mod caves;
+mod doom;
 mod invaders;
 mod pacman;
 mod raycast;
@@ -29,10 +30,11 @@ pub enum GameKind {
     IceCaves,
     Tetris,
     Arena,
+    Frostbite,
 }
 
 impl GameKind {
-    pub const ALL: [Self; 5] = [Self::PacMan, Self::SpaceInvaders, Self::IceCaves, Self::Tetris, Self::Arena];
+    pub const ALL: [Self; 6] = [Self::PacMan, Self::SpaceInvaders, Self::IceCaves, Self::Tetris, Self::Arena, Self::Frostbite];
 
     pub fn index(self) -> usize {
         match self {
@@ -41,6 +43,7 @@ impl GameKind {
             Self::IceCaves => 2,
             Self::Tetris => 3,
             Self::Arena => 4,
+            Self::Frostbite => 5,
         }
     }
 
@@ -51,6 +54,7 @@ impl GameKind {
             Self::IceCaves => "PENGUIN ICE CAVES",
             Self::Tetris => "BLOCKDROP",
             Self::Arena => "ICE ARENA",
+            Self::Frostbite => "FROSTBITE",
         }
     }
 
@@ -61,6 +65,7 @@ impl GameKind {
             Self::IceCaves => "caves",
             Self::Tetris => "tetris",
             Self::Arena => "arena",
+            Self::Frostbite => "frostbite",
         }
     }
 
@@ -71,6 +76,7 @@ impl GameKind {
             Self::IceCaves => "first-person raycast caves: collect fish, dodge seals",
             Self::Tetris => "hold, ghost piece, hard drop, line-clear fireworks",
             Self::Arena => "multiplayer first-person snowball deathmatch over the video chat room",
+            Self::Frostbite => "co-op FPS campaign: doors, keys, weapons, seals, walruses and yetis",
         }
     }
 
@@ -81,6 +87,7 @@ impl GameKind {
             Self::IceCaves => "W/S move  A/D turn  Q/E strafe",
             Self::Tetris => "A/D move  W rotate  S soft  Space drop  C hold",
             Self::Arena => "W/S move  A/D turn  Q/E strafe  Space throw",
+            Self::Frostbite => "W/S A/D Q/E move  Space throw  1/2 weapon",
         }
     }
 
@@ -92,7 +99,8 @@ impl GameKind {
             }
             "3" | "penguin" | "3d" | "caves" | "icecaves" | "ice-caves" | "peng" => Some(Self::IceCaves),
             "4" | "tetris" | "blocks" | "blockdrop" => Some(Self::Tetris),
-            "5" | "arena" | "deathmatch" | "fps" | "snowball" | "multiplayer" => Some(Self::Arena),
+            "5" | "arena" | "deathmatch" | "snowball" | "multiplayer" => Some(Self::Arena),
+            "6" | "frostbite" | "doom" | "campaign" | "fps" | "coop" | "co-op" => Some(Self::Frostbite),
             _ => None,
         }
     }
@@ -126,6 +134,7 @@ fn new_game(kind: GameKind) -> Box<dyn Game> {
         GameKind::IceCaves => Box::new(caves::CavesGame::new()),
         GameKind::Tetris => Box::new(tetris::TetrisGame::new()),
         GameKind::Arena => Box::new(arena::ArenaGame::new()),
+        GameKind::Frostbite => Box::new(doom::DoomGame::new()),
     }
 }
 
@@ -441,7 +450,7 @@ impl GamesPanel {
         }
 
         let hint = if is_focused {
-            "Up/Down or 1-5 pick  //  Enter play  //  in game: P pause, R restart, Esc menu"
+            "Up/Down or 1-6 pick  //  Enter play  //  in game: P pause, R restart, Esc menu"
         } else {
             "focus this tile (Ctrl+h/j/k/l or F8) to play"
         };
@@ -481,6 +490,7 @@ fn key_to_selection(code: KeyCode) -> Option<GameKind> {
         KeyCode::Char('3') => Some(GameKind::IceCaves),
         KeyCode::Char('4') => Some(GameKind::Tetris),
         KeyCode::Char('5') => Some(GameKind::Arena),
+        KeyCode::Char('6') => Some(GameKind::Frostbite),
         _ => None,
     }
 }

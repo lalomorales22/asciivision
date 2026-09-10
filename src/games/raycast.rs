@@ -6,36 +6,62 @@
 
 use super::{rgb, CellGrid};
 
+/// Wall kinds. 0 is open floor; everything else blocks movement and rays.
+pub const OPEN: u8 = 0;
+pub const ICE: u8 = 1;
+pub const ROCK: u8 = 2;
+pub const TECH: u8 = 3;
+pub const DOOR: u8 = 4;
+pub const LOCKED_DOOR: u8 = 5;
+
 #[derive(Clone, Debug)]
 pub struct Map {
     pub w: usize,
     pub h: usize,
-    cells: Vec<bool>,
+    cells: Vec<u8>,
 }
 
 impl Map {
     pub fn filled(w: usize, h: usize) -> Self {
-        Self { w, h, cells: vec![true; w * h] }
+        Self { w, h, cells: vec![ICE; w * h] }
     }
 
-    /// `#` is a wall, anything else is open.
+    /// `#` ice, `%` rock, `=` tech panel, `D` door, `K` locked door; anything
+    /// else is open floor.
     pub fn from_rows(rows: &[&str]) -> Self {
         let h = rows.len();
         let w = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
         let mut map = Self::filled(w, h);
         for (y, row) in rows.iter().enumerate() {
             for (x, ch) in row.chars().enumerate() {
-                map.cells[y * w + x] = ch == '#';
+                map.cells[y * w + x] = match ch {
+                    '#' => ICE,
+                    '%' => ROCK,
+                    '=' => TECH,
+                    'D' => DOOR,
+                    'K' => LOCKED_DOOR,
+                    _ => OPEN,
+                };
             }
         }
         map
     }
 
-    pub fn is_wall(&self, x: i32, y: i32) -> bool {
+    pub fn cell(&self, x: i32, y: i32) -> u8 {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
-            return true;
+            return ICE;
         }
         self.cells[y as usize * self.w + x as usize]
+    }
+
+    pub fn set_cell(&mut self, x: usize, y: usize, kind: u8) {
+        if x < self.w && y < self.h {
+            self.cells[y * self.w + x] = kind;
+        }
+    }
+
+    pub fn is_wall(&self, x: i32, y: i32) -> bool {
+        self.cell(x, y) != OPEN
     }
 
     pub fn wall_at(&self, x: f32, y: f32) -> bool {
@@ -46,15 +72,13 @@ impl Map {
     }
 
     pub fn set(&mut self, x: usize, y: usize, wall: bool) {
-        if x < self.w && y < self.h {
-            self.cells[y * self.w + x] = wall;
-        }
+        self.set_cell(x, y, if wall { ICE } else { OPEN });
     }
 
     pub fn open_cells(&self) -> Vec<(usize, usize)> {
         (0..self.h)
             .flat_map(|y| (0..self.w).map(move |x| (x, y)))
-            .filter(|&(x, y)| !self.cells[y * self.w + x])
+            .filter(|&(x, y)| self.cells[y * self.w + x] == OPEN)
             .collect()
     }
 
@@ -72,6 +96,13 @@ impl Map {
 
     /// DDA raycast. Returns (distance along the ray, hit a vertical face).
     pub fn cast(&self, px: f32, py: f32, angle: f32) -> (f32, bool) {
+        let hit = self.cast_hit(px, py, angle);
+        (hit.dist, hit.vertical)
+    }
+
+    /// DDA raycast with the wall kind and the texture coordinate along the
+    /// face that was hit.
+    pub fn cast_hit(&self, px: f32, py: f32, angle: f32) -> Hit {
         let (dir_x, dir_y) = (angle.cos(), angle.sin());
         let mut map_x = px as i32;
         let mut map_y = py as i32;
@@ -97,13 +128,28 @@ impl Map {
                 map_y += step_y;
                 false
             };
-            if self.is_wall(map_x, map_y) {
+            let kind = self.cell(map_x, map_y);
+            if kind != OPEN {
                 let dist = if vertical { side_x - delta_x } else { side_y - delta_y };
-                return (dist.max(0.05), vertical);
+                let tex_u = if vertical {
+                    (py + dist * dir_y).fract()
+                } else {
+                    (px + dist * dir_x).fract()
+                };
+                return Hit { dist: dist.max(0.05), vertical, kind, tex_u: tex_u.abs() };
             }
         }
-        (48.0, false)
+        Hit { dist: 48.0, vertical: false, kind: ICE, tex_u: 0.0 }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Hit {
+    pub dist: f32,
+    pub vertical: bool,
+    pub kind: u8,
+    /// Position along the wall face in `0..1`, for texturing.
+    pub tex_u: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -149,6 +195,12 @@ pub enum SpriteKind {
     Seal,
     Penguin,
     Snowball,
+    Walrus,
+    Yeti,
+    IceBolt,
+    AmmoCrate,
+    Key,
+    ExitBeacon,
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +252,101 @@ fn sprite_rows(kind: SpriteKind, size: i32) -> Vec<&'static str> {
             s if s >= 3 => vec!["o"],
             _ => vec!["·"],
         },
+        SpriteKind::Walrus => match size {
+            s if s >= 12 => vec!["  (ಠ益ಠ)  ", " /▓▓▓▓▓▓▓\\ ", "|▓▓▓▓▓▓▓▓▓|", "|▓▓▓▓▓▓▓▓▓|", " ▀▀     ▀▀ "],
+            s if s >= 8 => vec!["(ಠ益ಠ)", "/▓▓▓▓▓\\", "|▓▓▓▓▓|", " ▀   ▀ "],
+            s if s >= 5 => vec!["(ò_ó)", "/███\\"],
+            s if s >= 3 => vec!["(oo)", "/██\\"],
+            s if s >= 2 => vec!["oo", "██"],
+            _ => vec!["o"],
+        },
+        SpriteKind::Yeti => match size {
+            s if s >= 12 => vec!["  ▄███▄  ", " (◣_◢)", "/▒▒▒▒▒▒▒\\", " ▒▒▒▒▒▒▒ ", "  ▀   ▀  "],
+            s if s >= 8 => vec![" ▄██▄ ", "(◣_◢)", "/▒▒▒▒\\", " ▀  ▀ "],
+            s if s >= 5 => vec!["(◣_◢)", "/▒▒▒\\"],
+            s if s >= 3 => vec!["(xx)", "/▒▒\\"],
+            s if s >= 2 => vec!["xx", "▒▒"],
+            _ => vec!["x"],
+        },
+        SpriteKind::IceBolt => match size {
+            s if s >= 7 => vec!["◆"],
+            s if s >= 3 => vec!["◇"],
+            _ => vec!["·"],
+        },
+        SpriteKind::AmmoCrate => match size {
+            s if s >= 8 => vec!["┌●●●┐", "└───┘"],
+            s if s >= 4 => vec!["[●●]"],
+            s if s >= 2 => vec!["[]"],
+            _ => vec!["▪"],
+        },
+        SpriteKind::Key => match size {
+            s if s >= 6 => vec!["⚷ KEY"],
+            s if s >= 3 => vec!["⚷"],
+            _ => vec!["·"],
+        },
+        SpriteKind::ExitBeacon => match size {
+            s if s >= 8 => vec![" ▲ ", "▐█▌", "▐█▌", "▐█▌"],
+            s if s >= 4 => vec!["▲", "█", "█"],
+            s if s >= 2 => vec!["▲", "█"],
+            _ => vec!["▲"],
+        },
+    }
+}
+
+/// Texture lookup: glyph and base colour for a wall column sample.
+/// `tex_v` runs 0..8 down the face so patterns scale with distance.
+fn wall_texture(kind: u8, vertical: bool, tex_u: f32, tex_v: i32, perp: f32, palette: &Palette) -> (char, (u8, u8, u8)) {
+    let dist_glyph = if perp < 1.6 {
+        '█'
+    } else if perp < 3.5 {
+        '▓'
+    } else if perp < 7.0 {
+        '▒'
+    } else {
+        '░'
+    };
+    let u8x = (tex_u * 8.0) as i32;
+    match kind {
+        ROCK => {
+            let base = if vertical { (105, 100, 96) } else { (135, 128, 122) };
+            let checker = (u8x / 2 + tex_v / 2) % 2 == 0;
+            let glyph = if perp > 7.0 { '░' } else if checker { '▓' } else { '▒' };
+            (glyph, base)
+        }
+        TECH => {
+            let base = if vertical { (58, 88, 150) } else { (78, 112, 180) };
+            if tex_v % 4 == 0 {
+                ('═', (150, 190, 240))
+            } else if u8x == 4 {
+                ('│', (110, 150, 210))
+            } else {
+                (if perp < 3.5 { '▒' } else { '░' }, base)
+            }
+        }
+        DOOR => {
+            let base = if vertical { (190, 130, 60) } else { (220, 155, 75) };
+            if (3..=4).contains(&u8x) {
+                ('║', (120, 80, 40))
+            } else if tex_v == 4 {
+                ('─', (240, 190, 110))
+            } else {
+                (dist_glyph, base)
+            }
+        }
+        LOCKED_DOOR => {
+            let base = if vertical { (170, 60, 70) } else { (200, 75, 85) };
+            if (3..=4).contains(&u8x) && (3..=4).contains(&tex_v) {
+                ('⚿', (255, 220, 120))
+            } else if (3..=4).contains(&u8x) {
+                ('║', (110, 40, 45))
+            } else {
+                (dist_glyph, base)
+            }
+        }
+        _ => {
+            let base = if vertical { palette.wall_v } else { palette.wall_h };
+            (dist_glyph, base)
+        }
     }
 }
 
@@ -250,32 +397,28 @@ pub fn render_view(
     for x in 0..w {
         let screen = (x as f32 + 0.5) / w as f32 * 2.0 - 1.0;
         let ray = cam.angle + screen * cam.fov / 2.0;
-        let (dist, vertical) = map.cast(cam.x, cam.y, ray);
-        let perp = dist * (ray - cam.angle).cos();
+        let hit = map.cast_hit(cam.x, cam.y, ray);
+        let perp = hit.dist * (ray - cam.angle).cos();
         depth[x as usize] = perp;
         let height = ((view_h as f32 * 1.1) / perp.max(0.3)).min(view_h as f32 * 3.0) as i32;
         let col_top = horizon - height / 2 + cam.bob;
         let col_bottom = horizon + height / 2 + cam.bob;
         let fog = (1.0 - perp / palette.fog_range).clamp(0.12, 1.0);
-        let base = match tint {
-            Some(t) => t,
-            None if vertical => palette.wall_v,
-            None => palette.wall_h,
-        };
-        let color = lerp(dark, base, fog);
-        let ch = if perp < 1.6 {
-            '█'
-        } else if perp < 3.5 {
-            '▓'
-        } else if perp < 7.0 {
-            '▒'
-        } else {
-            '░'
-        };
         for y in col_top.max(top)..=col_bottom.min(bottom - 1) {
-            let stripe = (y + x / 3) % 7 == 0 && perp < 5.0;
-            let c = if stripe { lerp(color, (255, 255, 255), 0.18) } else { color };
-            let cc = rgb(c.0, c.1, c.2);
+            let tex_v = ((y - col_top) as f32 / height.max(1) as f32 * 8.0) as i32;
+            let (mut ch, base) = wall_texture(hit.kind, hit.vertical, hit.tex_u, tex_v, perp, palette);
+            let base = tint.unwrap_or(base);
+            let mut color = lerp(dark, base, fog);
+            if hit.kind == ICE {
+                let stripe = (y + x / 3) % 7 == 0 && perp < 5.0;
+                if stripe {
+                    color = lerp(color, (255, 255, 255), 0.18);
+                }
+            }
+            if tint.is_some() {
+                ch = if perp < 3.5 { '▓' } else { '▒' };
+            }
+            let cc = rgb(color.0, color.1, color.2);
             grid.set(x, y, ch, cc, cc);
         }
     }
@@ -390,6 +533,15 @@ mod tests {
             .collect();
         assert!(text.contains("(o o)") || text.contains("(●▾●)") || text.contains("(oo)"), "no penguin:\n{}", text);
         assert!(text.contains("bot"), "no label:\n{}", text);
+    }
+
+    #[test]
+    fn cast_hit_reports_kind_and_texture_coordinate() {
+        let map = Map::from_rows(&["#####", "#..D#", "#####"]);
+        let hit = map.cast_hit(1.5, 1.5, 0.0);
+        assert_eq!(hit.kind, DOOR);
+        assert!((hit.dist - 1.5).abs() < 1e-4);
+        assert!((hit.tex_u - 0.5).abs() < 1e-4, "tex_u = {}", hit.tex_u);
     }
 
     #[test]

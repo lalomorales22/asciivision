@@ -300,7 +300,7 @@ Every tile can be reassigned to any of 13 panel types: Transcript, Games, Tiles,
 
 ## Games Window
 
-`/games` (or focusing a tile and pressing F8 until it shows GAMES) opens the arcade bay. Pick with `1`-`5` or Up/Down and Enter. In any game `P` pauses, `R` restarts, `Esc` returns to the menu. High scores persist in `~/.config/asciivision/highscores.json` and show in the menu and the panel title.
+`/games` (or focusing a tile and pressing F8 until it shows GAMES) opens the arcade bay. Pick with `1`-`6` or Up/Down and Enter. In any game `P` pauses, `R` restarts, `Esc` returns to the menu. High scores persist in `~/.config/asciivision/highscores.json` and show in the menu and the panel title.
 
 | Game | What it is | Controls |
 |------|------------|----------|
@@ -309,11 +309,12 @@ Every tile can be reassigned to any of 13 panel types: Transcript, Games, Tiles,
 | **Penguin Ice Caves** | A first-person raycast maze (DDA raycasting, distance fog, side shading, depth-sorted sprites). Collect every fish before the clock runs out while seals patrol; each fish adds time, seals steal it. Fog-of-war minimap, falling snow, new maze every level | W/S move, A/D turn, Q/E strafe |
 | **Blockdrop** | Tetris with a 7-bag randomizer, hold, ghost piece, hard drop, wall kicks, line-clear flash with particles, next-piece preview and level speed-up | A/D move, W rotate, Q rotate back, S soft drop, Space hard drop, C hold |
 | **Ice Arena** | Multiplayer first-person snowball deathmatch in a symmetric arena, played over the video chat room. Freeze opponents with snowballs; frozen players respawn at the far side. Live scoreboard, event feed, bots, and a solo mode | W/S move, A/D turn, Q/E strafe, Space throw, B add bot |
+| **Frostbite** | Co-op first-person campaign: three hand-built levels of ice, rock and steel with textured walls, doors that open as you approach, locked doors and keys, fish (health) and snowball crates (ammo), seal grunts, walrus brutes and yeti casters, two weapons, and an exit beacon that unlocks once 60% of a level is cleared. Same host/join netcode as the arena, plus solo | W/S A/D Q/E move, Space throw, 1/2 or Tab weapon |
 
-### Multiplayer (Ice Arena)
+### Multiplayer (Ice Arena and Frostbite)
 
 1. One person hosts a room: `/server 8000`. Everyone else joins it: `/connect <host-ip>:8000`.
-2. Everyone opens the arcade (`/games`, then `5`).
+2. Everyone opens the arcade (`/games`, then `5` for the arena or `6` for the campaign).
 3. The host presses `H`. Within a second the others see "match hosted by ..." and press `J`.
 4. Anyone can press `S` at any time for a solo match against two bots, no room required.
 

@@ -31,6 +31,65 @@ pub enum GameMsg {
     Leave { game: String },
     Input { seq: u32, forward: f32, strafe: f32, turn: f32, fire: bool },
     State { tick: u32, players: Vec<NetPlayer>, projectiles: Vec<NetProjectile>, events: Vec<String> },
+    /// Frostbite (co-op campaign) input and state.
+    DoomInput { seq: u32, forward: f32, strafe: f32, turn: f32, fire: bool, weapon: u8, interact: bool },
+    DoomState {
+        tick: u32,
+        level: u8,
+        phase: u8,
+        phase_timer: f32,
+        heroes: Vec<NetHero>,
+        enemies: Vec<NetEnemy>,
+        shots: Vec<NetShot>,
+        pickups: Vec<NetPickup>,
+        open_doors: Vec<(u8, u8)>,
+        kills: u32,
+        kills_needed: u32,
+        events: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetHero {
+    pub id: String,
+    pub name: String,
+    pub x: f32,
+    pub y: f32,
+    pub angle: f32,
+    pub hp: i32,
+    pub ammo: u32,
+    pub keys: u8,
+    pub weapon: u8,
+    pub kills: u32,
+    pub color: u8,
+    pub dead_for: f32,
+    pub hurt: f32,
+    pub fired: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetEnemy {
+    pub id: u32,
+    pub kind: u8,
+    pub x: f32,
+    pub y: f32,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub hurt: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetShot {
+    pub x: f32,
+    pub y: f32,
+    pub hostile: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetPickup {
+    pub x: f32,
+    pub y: f32,
+    pub kind: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
