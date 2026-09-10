@@ -11,6 +11,9 @@ pub enum EffectKind {
     WireframeCube,
     Fire,
     Particles,
+    /// A rotating solid rendered through the art pipeline with the active
+    /// theme, so it changes look when the theme changes.
+    ThemeSolid,
 }
 
 impl EffectKind {
@@ -21,7 +24,8 @@ impl EffectKind {
             Self::Starfield => Self::WireframeCube,
             Self::WireframeCube => Self::Fire,
             Self::Fire => Self::Particles,
-            Self::Particles => Self::MatrixRain,
+            Self::Particles => Self::ThemeSolid,
+            Self::ThemeSolid => Self::MatrixRain,
         }
     }
 
@@ -33,6 +37,7 @@ impl EffectKind {
             Self::WireframeCube => "WIREFRAME 3D",
             Self::Fire => "FIRE SIM",
             Self::Particles => "PARTICLE STORM",
+            Self::ThemeSolid => "THEME 3D SOLID",
         }
     }
 }
@@ -91,7 +96,7 @@ impl EffectsEngine {
             return;
         }
 
-        if matches!(self.kind, EffectKind::Particles) {
+        if matches!(self.kind, EffectKind::ThemeSolid) {
             self.active = false;
             self.reset_buffers();
             return;
@@ -183,6 +188,7 @@ impl EffectsEngine {
             EffectKind::WireframeCube => render_wireframe_cube(buffer, area, phase),
             EffectKind::Fire => self.render_fire(buffer, area),
             EffectKind::Particles => self.render_particles(buffer, area),
+            EffectKind::ThemeSolid => render_theme_solid(buffer, area, phase),
         }
     }
 
@@ -447,45 +453,23 @@ fn render_plasma(buffer: &mut Buffer, area: Rect, phase: f32) {
 }
 
 fn render_wireframe_cube(buffer: &mut Buffer, area: Rect, phase: f32) {
-    let cx = area.width as f32 / 2.0;
-    let cy = area.height as f32 / 2.0;
-    let scale = (cx.min(cy * 2.0) * 0.6).max(4.0);
+    use crate::art::render3d;
+    use crate::theme::{color_to_rgb, t};
 
-    let vertices: [(f32, f32, f32); 8] = [
-        (-1.0, -1.0, -1.0),
-        (1.0, -1.0, -1.0),
-        (1.0, 1.0, -1.0),
-        (-1.0, 1.0, -1.0),
-        (-1.0, -1.0, 1.0),
-        (1.0, -1.0, 1.0),
-        (1.0, 1.0, 1.0),
-        (-1.0, 1.0, 1.0),
-    ];
+    // One shared 3D implementation: rotation, perspective and the terminal
+    // cell aspect correction all live in `art::render3d`.
+    let mesh = render3d::cube();
+    let rotation = [phase * 0.7, phase * 1.1, phase * 0.4];
+    let edges = render3d::projected_edges(
+        &mesh,
+        rotation,
+        3.0,
+        area.width as f32,
+        area.height as f32,
+        1,
+        1,
+    );
 
-    let edges: [(usize, usize); 12] = [
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    ];
-
-    let ax = phase * 0.7;
-    let ay = phase * 1.1;
-    let az = phase * 0.4;
-
-    let projected: Vec<(f32, f32, f32)> = vertices
-        .iter()
-        .map(|&(x, y, z)| {
-            let (x1, y1) = (x * ay.cos() - z * ay.sin(), x * ay.sin() + z * ay.cos());
-            let z1 = y1;
-            let (y2, z2) = (y * ax.cos() - z1 * ax.sin(), y * ax.sin() + z1 * ax.cos());
-            let (x2, y3) = (x1 * az.cos() - y2 * az.sin(), x1 * az.sin() + y2 * az.cos());
-            let depth = z2 + 3.0;
-            let perspective = 2.0 / depth.max(0.5);
-            (x2 * perspective * scale + cx, y3 * perspective * scale * 0.5 + cy, depth)
-        })
-        .collect();
-
-    use crate::theme::{t, color_to_rgb};
     let th = t();
     let c1 = color_to_rgb(th.accent3);
     let c2 = color_to_rgb(th.accent4);
@@ -498,24 +482,62 @@ fn render_wireframe_cube(buffer: &mut Buffer, area: Rect, phase: f32) {
         c5, c5, c5, c5,
     ];
 
-    for (i, &(a, b)) in edges.iter().enumerate() {
-        let (x0, y0, _) = projected[a];
-        let (x1, y1, _) = projected[b];
+    for (i, ((x0, y0, _), (x1, y1, _))) in edges.iter().enumerate() {
         let (cr, cg, cb) = edge_colors[i % edge_colors.len()];
-        draw_line(buffer, area, x0, y0, x1, y1, cr, cg, cb);
+        draw_line(buffer, area, *x0, *y0, *x1, *y1, cr, cg, cb);
     }
 
-    for (i, &(sx, sy, depth)) in projected.iter().enumerate() {
-        let px = area.x + sx as u16;
-        let py = area.y + sy as u16;
-        if px >= area.x && px < area.x + area.width && py >= area.y && py < area.y + area.height {
-            let brightness = ((1.0 - (depth - 2.0).abs() / 2.0) * 255.0).clamp(120.0, 255.0) as u8;
-            if let Some(cell) = buffer.cell_mut((px, py)) {
-                cell.set_char(['A', 'S', 'C', 'I', 'I', 'V', 'I', 'S'][i % 8]);
-                cell.set_fg(Color::Rgb(brightness, brightness, (brightness as f32 * 0.8) as u8));
+    // Vertex markers, brighter when nearer the camera.
+    let (mut dmin, mut dmax) = (f32::INFINITY, f32::NEG_INFINITY);
+    for ((_, _, d0), (_, _, d1)) in &edges {
+        dmin = dmin.min(*d0).min(*d1);
+        dmax = dmax.max(*d0).max(*d1);
+    }
+    let drange = (dmax - dmin).max(1e-3);
+    let mut seen: Vec<(u16, u16)> = Vec::with_capacity(8);
+    let mut label = 0usize;
+    for ((x0, y0, d0), (x1, y1, d1)) in &edges {
+        for &(sx, sy, depth) in &[(*x0, *y0, *d0), (*x1, *y1, *d1)] {
+            if sx < 0.0 || sy < 0.0 {
+                continue;
+            }
+            let px = area.x + sx as u16;
+            let py = area.y + sy as u16;
+            if seen.contains(&(px, py)) {
+                continue;
+            }
+            if px >= area.x && px < area.x + area.width && py >= area.y && py < area.y + area.height {
+                seen.push((px, py));
+                let near = 1.0 - ((depth - dmin) / drange).clamp(0.0, 1.0);
+                let brightness = (120.0 + 135.0 * near) as u8;
+                if let Some(cell) = buffer.cell_mut((px, py)) {
+                    cell.set_char(['A', 'S', 'C', 'I', 'I', 'V', 'I', 'S'][label % 8]);
+                    cell.set_fg(Color::Rgb(brightness, brightness, (brightness as f32 * 0.8) as u8));
+                }
+                label += 1;
             }
         }
     }
+}
+
+/// Animated 3D solid drawn through the art pipeline: filled, lit, depth-shaded
+/// under Depth3D/Blocks/Braille themes, wireframe under Classic/Wireframe/Minimal.
+/// The solid changes every few seconds.
+fn render_theme_solid(buffer: &mut Buffer, area: Rect, phase: f32) {
+    use crate::art::{self, ArtSpec, Generator};
+    use crate::theme::t;
+
+    let solids = [Generator::Torus, Generator::Icosahedron, Generator::Cube, Generator::Sphere, Generator::Terrain];
+    let which = ((phase / 9.0) as usize) % solids.len();
+    let spec = ArtSpec::new(solids[which], 7, area.width, area.height);
+    let rotation = if solids[which] == Generator::Terrain {
+        [0.95, phase * 0.5, 0.0]
+    } else {
+        [phase * 0.6 + 0.4, phase * 0.9, phase * 0.25]
+    };
+    let th = t();
+    let block = art::render_with_rotation(&spec, &th, Some(rotation));
+    block.blit(buffer, area, th.panel_bg);
 }
 
 fn draw_line(buffer: &mut Buffer, area: Rect, x0: f32, y0: f32, x1: f32, y1: f32, r: u8, g: u8, b: u8) {

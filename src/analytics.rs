@@ -1,7 +1,7 @@
 use crate::db::Database;
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use crate::theme::t;
@@ -74,7 +74,7 @@ impl AnalyticsPanel {
             .title(" ANALYTICS DASHBOARD ")
             .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
-            .border_type(BorderType::Double)
+            .border_type(t().border)
             .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 

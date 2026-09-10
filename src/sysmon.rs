@@ -1,6 +1,6 @@
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};
 use std::time::Instant;
@@ -8,8 +8,10 @@ use std::time::Instant;
 use crate::theme::t;
 
 pub struct SystemMonitor {
-    sys: System,
-    networks: Networks,
+    // Deferred: sysinfo initialization costs 250-700 ms on macOS, far too
+    // slow for startup, so it happens on the first refresh instead.
+    sys: Option<System>,
+    networks: Option<Networks>,
     last_refresh: Instant,
     cpu_usage: f32,
     cpu_per_core: Vec<f32>,
@@ -25,17 +27,10 @@ pub struct SystemMonitor {
 
 impl SystemMonitor {
     pub fn new() -> Self {
-        let sys = System::new_with_specifics(
-            RefreshKind::nothing()
-                .with_cpu(CpuRefreshKind::everything())
-                .with_memory(MemoryRefreshKind::everything()),
-        );
-        let networks = Networks::new_with_refreshed_list();
-
         Self {
-            sys,
-            networks,
-            last_refresh: Instant::now(),
+            sys: None,
+            networks: None,
+            last_refresh: Instant::now() - std::time::Duration::from_secs(10),
             cpu_usage: 0.0,
             cpu_per_core: Vec::new(),
             mem_total: 0,
@@ -55,20 +50,32 @@ impl SystemMonitor {
         }
         self.last_refresh = Instant::now();
 
-        self.sys.refresh_cpu_usage();
-        self.sys.refresh_memory();
-        self.networks.refresh(true);
+        if self.sys.is_none() {
+            self.sys = Some(System::new_with_specifics(
+                RefreshKind::nothing()
+                    .with_cpu(CpuRefreshKind::everything())
+                    .with_memory(MemoryRefreshKind::everything()),
+            ));
+        }
+        if self.networks.is_none() {
+            self.networks = Some(Networks::new_with_refreshed_list());
+        }
+        let sys = self.sys.as_mut().expect("initialized above");
+        let networks = self.networks.as_mut().expect("initialized above");
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        networks.refresh(true);
 
-        self.cpu_usage = self.sys.global_cpu_usage();
-        self.cpu_per_core = self.sys.cpus().iter().map(|c| c.cpu_usage()).collect();
-        self.mem_total = self.sys.total_memory();
-        self.mem_used = self.sys.used_memory();
-        self.swap_total = self.sys.total_swap();
-        self.swap_used = self.sys.used_swap();
+        self.cpu_usage = sys.global_cpu_usage();
+        self.cpu_per_core = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
+        self.mem_total = sys.total_memory();
+        self.mem_used = sys.used_memory();
+        self.swap_total = sys.total_swap();
+        self.swap_used = sys.used_swap();
 
         let mut rx = 0u64;
         let mut tx = 0u64;
-        for (_name, data) in self.networks.iter() {
+        for (_name, data) in networks.iter() {
             rx += data.received();
             tx += data.transmitted();
         }
@@ -77,7 +84,7 @@ impl SystemMonitor {
 
         let load = System::load_average();
         self.load_avg = [load.one, load.five, load.fifteen];
-        self.process_count = self.sys.cpus().len();
+        self.process_count = sys.cpus().len();
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, phase: f32, is_focused: bool) {
@@ -87,9 +94,9 @@ impl SystemMonitor {
             .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
             .border_type(if is_focused {
-                BorderType::Double
+                t().border
             } else {
-                BorderType::Plain
+                t().border_alt
             })
             .border_style(Style::default().fg(border_color));
         frame.render_widget(block, area);

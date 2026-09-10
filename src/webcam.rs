@@ -13,7 +13,6 @@ use std::thread;
 use crate::message::WsAsciiFrame;
 use crate::video::AsciiFrame;
 
-const PALETTE: &[u8] = b" .'`^\",:;Il!i><~+_-?][}{1)(|\\tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
 
 #[derive(Debug, Clone)]
 pub struct WebcamConfig {
@@ -87,10 +86,8 @@ fn luminance(r: u8, g: u8, b: u8) -> u8 {
     (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32).min(255.0) as u8
 }
 
-fn ascii_for(r: u8, g: u8, b: u8) -> char {
-    let y = luminance(r, g, b) as usize;
-    let idx = (y * (PALETTE.len() - 1)) / 255;
-    PALETTE[idx.min(PALETTE.len() - 1)] as char
+fn ascii_for(theme: &crate::theme::Theme, r: u8, g: u8, b: u8) -> char {
+    theme.ramp_glyph_u8(luminance(r, g, b))
 }
 
 fn open_webcam_device(device_spec: &str, format_name: &str, opts: ffmpeg_next::Dictionary) -> Result<ffmpeg_next::format::context::Input> {
@@ -233,13 +230,14 @@ fn rgb_to_ascii(rgb: &Video, width: u16, height: u16) -> AsciiFrame {
     let stride = rgb.stride(0);
     let data = rgb.data(0);
     let mut cells = Vec::with_capacity(width as usize * height as usize);
+    let theme = crate::theme::t().clone();
 
     for y in 0..height as usize {
         let row = &data[y * stride..y * stride + width as usize * 3];
         for x in 0..width as usize {
             let i = x * 3;
             let (r, g, b) = (row[i], row[i + 1], row[i + 2]);
-            cells.push((ascii_for(r, g, b), r, g, b));
+            cells.push((ascii_for(&theme, r, g, b), r, g, b));
         }
     }
 

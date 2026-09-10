@@ -558,4 +558,39 @@ impl TilingManager {
             *leaf = panel;
         }
     }
+
+    /// Bring `panel` on screen without stealing the transcript. If a tile
+    /// already shows it, focus that tile. Otherwise take over the focused
+    /// tile, unless that is the transcript, in which case a secondary tile
+    /// (video, effects, webcam, or any other non-transcript tile) is used.
+    /// A single-tile layout falls back to replacing the only tile.
+    pub fn show_panel(&mut self, panel: PanelKind) {
+        let leaves = self.leaves();
+        if let Some((id, _)) = leaves.iter().find(|(_, kind)| *kind == panel) {
+            self.focused = *id;
+            return;
+        }
+        let focused_kind = self.focused_panel();
+        let target = if focused_kind != Some(PanelKind::Transcript) || leaves.len() <= 1 {
+            self.focused
+        } else {
+            // The webcam tile is redundant with a chat feed grid, so it goes
+            // first; the video bus is the showcase, so it goes last.
+            let preferred = [PanelKind::Webcam, PanelKind::Effects3D, PanelKind::Video];
+            preferred
+                .iter()
+                .find_map(|want| leaves.iter().find(|(_, kind)| kind == want).map(|(id, _)| *id))
+                .or_else(|| {
+                    leaves
+                        .iter()
+                        .find(|(_, kind)| *kind != PanelKind::Transcript)
+                        .map(|(id, _)| *id)
+                })
+                .unwrap_or(self.focused)
+        };
+        if let Some(leaf) = self.tree.find_leaf_mut(target) {
+            *leaf = panel;
+        }
+        self.focused = target;
+    }
 }

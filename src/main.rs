@@ -7,8 +7,9 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use rand::Rng;
 use serde::Deserialize;
 use std::{
     collections::VecDeque,
@@ -19,6 +20,7 @@ use std::{
 use tokio::sync::mpsc;
 
 mod ai;
+mod art;
 mod analytics;
 mod client;
 mod db;
@@ -58,6 +60,51 @@ use webcam::WebcamCapture;
 
 const INTRO_DURATION: Duration = Duration::from_millis(7600);
 
+/// Autocomplete table for the TRANSMIT line. Entries ending in a space take
+/// an argument. Order matters: put the bare command before its variants so
+/// Enter on an exact match dispatches instead of re-completing.
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "toggle the operations manual"),
+    ("/art", "random procedural art in the transcript"),
+    ("/art list", "list the 17 art generators"),
+    ("/art ", "art <generator> [seed] [--size WxH]"),
+    ("/theme", "list theme styles"),
+    ("/theme next", "cycle theme style (F11)"),
+    ("/theme random", "re-roll palette hues within the style"),
+    ("/theme reset", "restore the classic theme"),
+    ("/theme ", "theme classic|blocks|braille|minimal|wireframe|depth3d"),
+    ("/clear", "purge the transcript"),
+    ("/video", "toggle the video bus"),
+    ("/video ", "load a local video file into the bus"),
+    ("/youtube ", "stream a YouTube URL into the bus"),
+    ("/webcam", "toggle the live ASCII webcam feed"),
+    ("/3d", "toggle 3D effects"),
+    ("/fx", "cycle 3D effects, then off"),
+    ("/analytics", "conversation analytics in the focused tile"),
+    ("/sysmon", "system monitor in the focused tile"),
+    ("/games", "arcade panel"),
+    ("/games ", "games pacman|space|penguin|play|menu"),
+    ("/tiles", "boot 2 live PTY terminals"),
+    ("/tiles ", "boot 1-8 live PTY terminals"),
+    ("/layout", "cycle layout preset"),
+    ("/layout ", "layout default|dual|triple|quad|webcam|focus"),
+    ("/server ", "host a video chat room on a port"),
+    ("/connect ", "join a video chat room: ip:port"),
+    ("/chat ", "send a message in the video chat room"),
+    ("/username ", "set your video chat handle"),
+    ("/provider ", "switch AI route: claude, grok, gpt, gemini, ollama"),
+    ("/ollama", "open the local Ollama model picker"),
+    ("/trust", "cycle the tool-approval policy"),
+    ("/remember ", "store a fact: /remember key = value"),
+    ("/forget ", "drop a fact from agent memory"),
+    ("/recall ", "look up a fact in agent memory"),
+    ("/memory", "dump agent memory"),
+    ("/pin", "pin the last message into context"),
+    ("/unpin", "unpin the last pinned message"),
+    ("/curl ", "run curl"),
+    ("/brew ", "run brew"),
+];
+
 const LARGE_LOGO: &[&str] = &[
     "  █████╗ ███████╗ ██████╗ ██╗ ██╗ ██╗   ██╗ ██╗ ███████╗ ██╗  ██████╗  ███╗   ██╗",
     " ██╔══██╗██╔════╝██╔════╝ ██║ ██║ ██║   ██║ ██║ ██╔════╝ ██║ ██╔═══██╗ ████╗  ██║",
@@ -76,7 +123,7 @@ const SMALL_LOGO: &[&str] = &[
 ];
 
 const SCROLLER_TEXT: &str =
-    " ASCIIVISION v2.0 // AI DEMOZONE // LIVE VIDEO CHAT // WEBCAM ASCII // 3D EFFECTS ENGINE // TRUE PTY TILES // !bash !curl !brew // F2 MODEL // F3 VIDEO // F4 FX CYCLE // F5 WEBCAM // F6 LAYOUT // F7 TILES // CTRL+L PURGE // THIS TERMINAL HAS LEFT THE BUILDING ";
+    " ASCIIVISION v2.0 // AI DEMOZONE // LIVE VIDEO CHAT // WEBCAM ASCII // 3D EFFECTS ENGINE // TRUE PTY TILES // !bash !curl !brew // F2 MODEL // F3 VIDEO // F4 FX CYCLE // F5 WEBCAM // F6 LAYOUT // F7 TILES // F11 THEME // F12 ART // /art // CTRL+L PURGE // THIS TERMINAL HAS LEFT THE BUILDING ";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -121,6 +168,14 @@ struct Args {
     /// Start with 3D effects active
     #[arg(long, default_value_t = false)]
     effects: bool,
+
+    /// Start with a theme style: classic, blocks, braille, minimal, wireframe, depth3d
+    #[arg(long)]
+    theme: Option<String>,
+
+    /// Render procedural art to stdout and exit, e.g. --art "mandelbrot --seed 7 --size 80x30"
+    #[arg(long)]
+    art: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +191,7 @@ enum MessageKind {
     Assistant,
     Shell,
     System,
+    Art,
 }
 
 struct ChatMessage {
@@ -145,6 +201,10 @@ struct ChatMessage {
     accent: Color,
     include_in_context: bool,
     context_role: &'static str,
+    /// Static procedural art rendered under the theme active at creation.
+    /// Drawn unwrapped with per-cell color; `content` holds a short textual
+    /// description that is what the model sees.
+    art: Option<art::ArtBlock>,
 }
 
 struct PendingApprovalState {
@@ -264,6 +324,13 @@ struct App {
     pinned_messages: Vec<usize>,
     shell_output_history: VecDeque<String>,
     prev_mode: AppMode,
+    /// Inner width of the transcript tile from the last frame; art is
+    /// generated to fit it.
+    transcript_width: u16,
+    /// Highlighted row in the slash-command autocomplete popup.
+    autocomplete_index: usize,
+    /// Scroll offset of the help overlay.
+    help_scroll: usize,
 }
 
 impl ChatMessage {
@@ -275,6 +342,7 @@ impl ChatMessage {
             accent: t().accent4,
             include_in_context: true,
             context_role: "user",
+            art: None,
         }
     }
 
@@ -286,6 +354,7 @@ impl ChatMessage {
             accent: provider.color(),
             include_in_context: true,
             context_role: "assistant",
+            art: None,
         }
     }
 
@@ -297,6 +366,7 @@ impl ChatMessage {
             accent,
             include_in_context: true,
             context_role: "user",
+            art: None,
         }
     }
 
@@ -308,6 +378,30 @@ impl ChatMessage {
             accent: t().accent1,
             include_in_context: false,
             context_role: "user",
+            art: None,
+        }
+    }
+
+    /// A procedural art block. The model only ever sees the one-line
+    /// description in `content`, never the glyphs.
+    fn art(block: art::ArtBlock, origin: &str) -> Self {
+        let content = format!(
+            "[procedural art rendered in the transcript: {} generator, seed {}, {}x{}, {} theme, via {}]",
+            block.spec.generator.name(),
+            block.spec.seed,
+            block.width,
+            block.height,
+            block.style.name(),
+            origin
+        );
+        Self {
+            kind: MessageKind::Art,
+            label: "ART".to_string(),
+            content,
+            accent: t().accent2,
+            include_in_context: true,
+            context_role: "user",
+            art: Some(block),
         }
     }
 }
@@ -435,7 +529,21 @@ impl App {
             } else {
                 AppMode::Intro
             },
+            transcript_width: 96,
+            autocomplete_index: 0,
+            help_scroll: 0,
         };
+
+        if let Some(name) = args.theme.as_deref() {
+            match theme::ThemeStyle::from_name(name) {
+                Some(style) => theme::set_style(style),
+                None => app.add_system_message(format!(
+                    "unknown --theme {}; try {}",
+                    name,
+                    theme::ThemeStyle::ALL.iter().map(|s| s.name()).collect::<Vec<_>>().join(", ")
+                )),
+            }
+        }
 
         app.add_system_message(
             "shell deck armed: use !<command> for bash, or /curl and /brew for shortcuts",
@@ -463,9 +571,31 @@ impl App {
         app.add_system_message(
             "tiling: Ctrl+hjkl focus, Ctrl+Shift+hjkl swap, Ctrl+[/] resize, Ctrl+n cycle panel, /layout cycle preset"
         );
+        app.add_system_message(format!(
+            "art engine online: /art [generator] [seed] or F12 for random art // /art list // themes: /theme list, F11 cycles ({} active)",
+            theme::current_style().title()
+        ));
 
         if app.video.is_none() {
             app.add_system_message("video signal offline: no bundled mp4 found, falling back to synthetic raster field");
+        }
+
+        // A fresh piece of art every boot: proof of life for the art engine
+        // and a reason to look at the transcript before typing anything.
+        {
+            let seed = rand::thread_rng().gen_range(0..1_000_000u64);
+            let showcase = [
+                art::Generator::Mandelbrot,
+                art::Generator::Julia,
+                art::Generator::Attractor,
+                art::Generator::Plant,
+                art::Generator::Torus,
+                art::Generator::Noise,
+                art::Generator::Flow,
+            ];
+            let generator = showcase[(seed % showcase.len() as u64) as usize];
+            let spec = art::ArtSpec::new(generator, seed, 64, 18);
+            app.push_art(spec, "boot splash");
         }
 
         if app.db.is_none() && !args.no_db {
@@ -715,6 +845,13 @@ impl App {
             }
         }
 
+        // The video chat transmits whatever the F5 webcam is currently seeing.
+        if let (Some(vc), Some(frame)) = (&self.video_chat, &self.webcam_frame) {
+            if vc.is_connected() {
+                vc.send_frame(frame);
+            }
+        }
+
         while let Ok(event) = self.events_rx.try_recv() {
             match event {
                 AppEvent::AiFinished { session_id, result } => {
@@ -815,6 +952,14 @@ impl App {
                         );
                         while self.shell_output_history.len() > 5 {
                             self.shell_output_history.pop_back();
+                        }
+                    }
+
+                    // The generate_art tool is pure and deterministic, so the UI
+                    // re-renders the same spec here to show it in the transcript.
+                    for tr in tool_results.iter().filter(|tr| tr.name == "generate_art" && tr.success) {
+                        if let Some(call) = tool_calls.iter().find(|c| c.id == tr.tool_call_id) {
+                            self.render_art_from_tool(&call.arguments, &tr.content);
                         }
                     }
 
@@ -1113,6 +1258,35 @@ impl App {
             return Ok(false);
         }
 
+        // While the help overlay is open, the navigation keys scroll it.
+        if self.show_help {
+            match key.code {
+                KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(8);
+                    return Ok(false);
+                }
+                KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                    return Ok(false);
+                }
+                KeyCode::PageDown => {
+                    self.help_scroll += 8;
+                    return Ok(false);
+                }
+                KeyCode::Down => {
+                    self.help_scroll += 1;
+                    return Ok(false);
+                }
+                KeyCode::Esc | KeyCode::F(1) => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                    self.status_note = "help overlay closed".to_string();
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+
         if !matches!(key.code, KeyCode::F(_))
             && !(key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(key.code, KeyCode::Char('l') | KeyCode::Char('c')))
@@ -1157,13 +1331,35 @@ impl App {
             }
             KeyCode::F(1) => {
                 self.show_help = !self.show_help;
-                theme::set_random_theme();
-                self.status_note = "theme randomized // F1 help".to_string();
+                self.help_scroll = 0;
+                self.status_note = if self.show_help {
+                    "help overlay open // F1 to close".to_string()
+                } else {
+                    "help overlay closed".to_string()
+                };
+            }
+            KeyCode::F(11) => {
+                let style = theme::cycle_style();
+                self.status_note = format!("theme: {}", style.title());
+                self.add_system_message(format!(
+                    "theme style -> {}: {} // F11 cycles, /theme <name> picks, F9 randomizes hues within it",
+                    style.title(),
+                    style.description()
+                ));
+            }
+            KeyCode::F(12) => {
+                let seed = rand::thread_rng().gen_range(0..1_000_000u64);
+                let (w, h) = art::ArtSpec::default_size(self.transcript_width);
+                let spec = art::ArtSpec::new(art::Generator::from_seed(seed), seed, w, h);
+                self.push_art(spec, "F12");
             }
             KeyCode::F(9) => {
                 theme::set_random_theme();
                 self.status_note = "theme randomized".to_string();
-                self.add_system_message("color palette randomized -- F9 again for another, /theme reset to restore defaults");
+                self.add_system_message(format!(
+                    "color palette randomized within {} -- F9 again for another, /theme reset to restore defaults",
+                    theme::current_style().title()
+                ));
             }
             KeyCode::F(10) => {
                 theme::reset_theme();
@@ -1238,28 +1434,43 @@ impl App {
                 self.scroll_lines += 8;
             }
             KeyCode::Up => {
-                self.follow_tail = false;
-                self.scroll_lines = self.scroll_lines.saturating_sub(1);
+                if !self.autocomplete_suggestions().is_empty() {
+                    self.autocomplete_index = self.autocomplete_index.saturating_sub(1);
+                } else {
+                    self.follow_tail = false;
+                    self.scroll_lines = self.scroll_lines.saturating_sub(1);
+                }
             }
             KeyCode::Down => {
-                self.scroll_lines += 1;
+                let count = self.autocomplete_suggestions().len();
+                if count > 0 {
+                    self.autocomplete_index = (self.autocomplete_index + 1).min(count - 1);
+                } else {
+                    self.scroll_lines += 1;
+                }
             }
             KeyCode::Backspace => {
                 self.input.pop();
+                self.autocomplete_index = 0;
             }
             KeyCode::Enter => {
                 if self.pending_approval.is_some() && self.input.is_empty() {
                     self.approve_pending();
+                } else if self.apply_autocomplete() {
+                    // Completed a partial slash command; wait for the next Enter.
                 } else {
                     let input = self.input.trim().to_string();
                     self.input.clear();
+                    self.autocomplete_index = 0;
                     if !input.is_empty() {
                         self.dispatch_input(input);
                     }
                 }
             }
             KeyCode::Tab => {
-                self.input.push_str("    ");
+                if !self.apply_autocomplete() {
+                    self.input.push_str("    ");
+                }
             }
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1290,6 +1501,7 @@ impl App {
                     }
                 } else if !key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.input.push(c);
+                    self.autocomplete_index = 0;
                 }
             }
             _ => {}
@@ -1327,11 +1539,110 @@ impl App {
         )
     }
 
+    /// Slash commands matching the current input, shown while typing a
+    /// command with no arguments yet.
+    fn autocomplete_suggestions(&self) -> Vec<&'static (&'static str, &'static str)> {
+        if self.input.starts_with('/') && !self.input.trim_end().contains(' ') {
+            SLASH_COMMANDS
+                .iter()
+                .filter(|(cmd, _)| cmd.starts_with(self.input.as_str()))
+                .take(9)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Replace the input with the highlighted suggestion. Returns false when
+    /// there is nothing to complete or the input already matches exactly.
+    fn apply_autocomplete(&mut self) -> bool {
+        let suggestions = self.autocomplete_suggestions();
+        if suggestions.is_empty() {
+            return false;
+        }
+        let idx = self.autocomplete_index.min(suggestions.len() - 1);
+        let chosen = suggestions[idx].0;
+        if self.input == chosen {
+            return false;
+        }
+        self.input = chosen.to_string();
+        self.autocomplete_index = 0;
+        true
+    }
+
+    /// Connect the app's stored client (so status, users and frames land in
+    /// the panels) and start streaming the webcam.
+    fn start_video_chat(&mut self, url: String, delay_ms: u64) {
+        let username = self.username.clone();
+        let client = VideoChatClient::new(username.clone(), url.clone());
+        self.add_system_message(format!("connecting to {} as {}", url, username));
+        let status_arc = client.status.clone();
+        let fut = client.connect_future();
+        self.video_chat = Some(client);
+        tokio::spawn(async move {
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            if let Err(e) = fut.await {
+                *status_arc.write() = format!("connection failed: {}", e);
+            }
+        });
+        self.ensure_webcam_for_videochat();
+        self.tiling.show_panel(PanelKind::VideoChatFeeds);
+        self.status_note = "video chat connecting...".to_string();
+    }
+
+    /// Video chat needs a camera; start the F5 webcam if it is not running.
+    fn ensure_webcam_for_videochat(&mut self) {
+        if self.webcam.is_some() {
+            return;
+        }
+        let config = self.webcam_config();
+        match WebcamCapture::start(config) {
+            Ok(cam) => {
+                self.webcam = Some(cam);
+                self.add_system_message("webcam started for video chat (F5 toggles it)");
+            }
+            Err(e) => self.add_system_message(format!(
+                "webcam failed to start: {} -- video chat will run without your camera",
+                e
+            )),
+        }
+    }
+
     fn dispatch_input(&mut self, input: String) {
         self.follow_tail = true;
 
         if input == "/help" {
             self.show_help = !self.show_help;
+            self.help_scroll = 0;
+            return;
+        }
+
+        if let Some(path) = input.strip_prefix("/video ") {
+            let path = path.trim().trim_matches('"').to_string();
+            if path.is_empty() {
+                self.add_system_message("usage: /video /path/to/file.mp4");
+                return;
+            }
+            let video_path = PathBuf::from(&path);
+            if !video_path.exists() {
+                self.add_system_message(format!("file not found: {}", path));
+                return;
+            }
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((132, 46));
+            let decode = (cols.saturating_sub(6).max(40), rows.saturating_sub(8).max(20));
+            match VideoPlayer::new(video_path, decode, true) {
+                Ok(player) => {
+                    self.video = Some(player);
+                    self.video_enabled = true;
+                    self.video_source_label = path.clone();
+                    self.tiling.show_panel(PanelKind::Video);
+                    self.status_note = format!("playing: {}", truncate(&path, 40));
+                    self.add_system_message(format!("video loaded: {}", path));
+                }
+                Err(e) => self.add_system_message(format!("video error: {}", e)),
+            }
             return;
         }
 
@@ -1417,15 +1728,84 @@ impl App {
 
         if input == "/randomize" || input == "/theme random" {
             theme::set_random_theme();
-            self.add_system_message("color palette randomized -- /theme reset to restore defaults");
+            self.add_system_message(format!(
+                "color palette randomized within {} -- /theme reset to restore defaults",
+                theme::current_style().title()
+            ));
             self.status_note = "theme randomized".to_string();
             return;
         }
 
         if input == "/theme reset" || input == "/theme default" {
             theme::reset_theme();
-            self.add_system_message("theme restored to factory defaults");
+            self.add_system_message("theme restored to factory defaults (classic)");
             self.status_note = "theme reset".to_string();
+            return;
+        }
+
+        if input == "/theme" || input == "/theme list" || input == "/themes" {
+            let current = theme::current_style();
+            let lines: Vec<String> = theme::ThemeStyle::ALL
+                .iter()
+                .map(|s| {
+                    format!(
+                        "  {} {:<10} {}",
+                        if *s == current { ">" } else { " " },
+                        s.name(),
+                        s.description()
+                    )
+                })
+                .collect();
+            self.add_system_message(format!(
+                "themes (F11 cycles, /theme <name> picks, /theme random re-rolls hues, /theme reset):\n{}",
+                lines.join("\n")
+            ));
+            return;
+        }
+
+        if input == "/theme next" || input == "/theme cycle" {
+            let style = theme::cycle_style();
+            self.add_system_message(format!("theme style -> {}: {}", style.title(), style.description()));
+            self.status_note = format!("theme: {}", style.title());
+            return;
+        }
+
+        if let Some(name) = input.strip_prefix("/theme ") {
+            match theme::ThemeStyle::from_name(name) {
+                Some(style) => {
+                    theme::set_style(style);
+                    self.add_system_message(format!("theme style -> {}: {}", style.title(), style.description()));
+                    self.status_note = format!("theme: {}", style.title());
+                }
+                None => {
+                    self.add_system_message(format!(
+                        "unknown theme '{}'. options: {}, random, reset, next, list",
+                        name.trim(),
+                        theme::ThemeStyle::ALL.iter().map(|s| s.name()).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            }
+            return;
+        }
+
+        if input == "/art list" || input == "/art help" || input == "/arts" {
+            self.add_system_message(format!(
+                "procedural art generators (usage: /art [generator] [seed] [--seed N] [--size WxH]):\n{}\n  F12 = random art // the AI can also call generate_art on its own",
+                art::Generator::list_text()
+            ));
+            return;
+        }
+
+        if input == "/art" || input.starts_with("/art ") {
+            let args = input.strip_prefix("/art").unwrap_or("").trim();
+            let fallback_seed = rand::thread_rng().gen_range(0..1_000_000u64);
+            match art::ArtSpec::parse(args, fallback_seed, self.transcript_width) {
+                Ok(spec) => self.push_art(spec, "/art"),
+                Err(e) => self.add_system_message(format!(
+                    "art: {} // usage: /art [generator] [seed] [--seed N] [--size WxH] // /art list",
+                    e
+                )),
+            }
             return;
         }
 
@@ -1561,28 +1941,30 @@ impl App {
                     }
                 });
                 self.status_note = format!("video chat server live on :{}", port);
+                // Join our own room so the host is a participant too.
+                self.start_video_chat(format!("ws://127.0.0.1:{}", port), 250);
             } else {
                 self.add_system_message("usage: /server <port>");
             }
             return;
         }
 
-        if let Some(url) = input.strip_prefix("/connect ") {
-            let url = url.trim().to_string();
-            let username = self.username.clone();
-            let client = VideoChatClient::new(username.clone(), url.clone());
-            self.add_system_message(format!("connecting to {} as {}", url, username));
-            let status_arc = client.status.clone();
-            self.video_chat = Some(client);
-            // spawn connection using a fresh client that will manage its own Arc state
-            tokio::spawn(async move {
-                let temp_client = VideoChatClient::new(username, url);
-                if let Err(e) = temp_client.connect().await {
-                    *status_arc.write() = format!("connection failed: {}", e);
-                }
-            });
-            self.tiling.set_focused_panel(PanelKind::VideoChatFeeds);
-            self.status_note = "video chat connecting...".to_string();
+        if let Some(raw) = input.strip_prefix("/connect ") {
+            // Accept ip:port, ws://host:port, wss://..., or ws:host:port.
+            let raw = raw.trim();
+            let stripped = raw
+                .strip_prefix("wss://")
+                .or_else(|| raw.strip_prefix("ws://"))
+                .or_else(|| raw.strip_prefix("wss:"))
+                .or_else(|| raw.strip_prefix("ws:"))
+                .unwrap_or(raw)
+                .trim_start_matches('/');
+            if stripped.is_empty() {
+                self.add_system_message("usage: /connect <ip>:<port>");
+                return;
+            }
+            let url = format!("ws://{}", stripped);
+            self.start_video_chat(url, 0);
             return;
         }
 
@@ -1818,6 +2200,47 @@ impl App {
         self.messages.push(message);
     }
 
+    /// Render a spec under the active theme and commit it to the transcript
+    /// as a static block. Art is not typewriter-revealed: a wide block
+    /// appearing one glyph at a time looks broken mid-reveal.
+    fn push_art(&mut self, spec: art::ArtSpec, origin: &str) {
+        let block = art::render(&spec, &t());
+        self.status_note = format!(
+            "art: {} seed {} ({}x{}, {})",
+            spec.generator.name(),
+            spec.seed,
+            block.width,
+            block.height,
+            block.style.name()
+        );
+        self.messages.push(ChatMessage::art(block, origin));
+        self.follow_tail = true;
+    }
+
+    /// Build an `ArtSpec` from the `generate_art` tool arguments.
+    fn render_art_from_tool(&mut self, args: &serde_json::Value, result_content: &str) {
+        let generator = args
+            .get("generator")
+            .and_then(|v| v.as_str())
+            .and_then(art::Generator::from_name);
+        // The tool picks a seed when the model omits one; read it back from
+        // the result so the transcript shows exactly what the model was told.
+        let reported_seed = result_content
+            .split_whitespace()
+            .find_map(|tok| tok.strip_prefix("seed=").and_then(|v| v.parse::<u64>().ok()));
+        let seed = args
+            .get("seed")
+            .and_then(|v| v.as_u64())
+            .or(reported_seed)
+            .unwrap_or_else(|| rand::thread_rng().gen_range(0..1_000_000u64));
+        let generator = generator.unwrap_or_else(|| art::Generator::from_seed(seed));
+        let (dw, dh) = art::ArtSpec::default_size(self.transcript_width);
+        let width = args.get("width").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(dw);
+        let height = args.get("height").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(dh);
+        let spec = art::ArtSpec::new(generator, seed, width.min(self.transcript_width.saturating_sub(2).max(art::MIN_WIDTH)), height);
+        self.push_art(spec, "generate_art tool");
+    }
+
     fn persist(&self, provider: &AIProvider, role: &str, kind: &str, content: &str) {
         if let Some(db) = &self.db {
             let _ = db.save_message(provider.db_key(), role, kind, content);
@@ -2047,7 +2470,7 @@ impl App {
             .title(" [SYSTEM:DEM0ZONE v2.0] [MODE:AGENTIC] [MODULES:AI+VIDEO+WEBCAM+3D+ANALYTICS] ")
             .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
-            .border_type(BorderType::Double)
+            .border_type(t().border)
             .border_style(Style::default().fg(t().accent1));
         frame.render_widget(outer, area);
 
@@ -2217,7 +2640,10 @@ impl App {
             area,
         );
         match panel {
-            PanelKind::Transcript => self.render_messages_tile(frame, area, is_focused),
+            PanelKind::Transcript => {
+                self.transcript_width = area.width.saturating_sub(2);
+                self.render_messages_tile(frame, area, is_focused)
+            }
             PanelKind::Games => self.games.render(frame, area, phase, is_focused),
             PanelKind::Tiles => self.tiles.render(frame, area, is_focused),
             PanelKind::Video => self.render_video_panel(frame, area, phase),
@@ -2268,9 +2694,9 @@ impl App {
             .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
             .border_type(if is_focused {
-                BorderType::Double
+                t().border
             } else {
-                BorderType::Plain
+                t().border_alt
             })
             .border_style(Style::default().fg(border_color));
         frame.render_widget(block, area);
@@ -2284,7 +2710,7 @@ impl App {
             .title(" COMMAND DECK ")
             .title_style(Style::default().fg(t().accent1).bold())
             .borders(Borders::ALL)
-            .border_type(BorderType::Double)
+            .border_type(t().border)
             .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 
@@ -2328,12 +2754,13 @@ impl App {
             .unwrap_or("?");
 
         let meta = format!(
-            "{} // {} {} {} {} // layout:{} focus:{} // ai:{} shell:{}",
+            "{} // {} {} {} {} // theme:{} layout:{} focus:{} // ai:{} shell:{}",
             self.provider_status_badge(),
             if self.video_enabled { "vid:on" } else { "vid:off" },
             cam_tag,
             fx_tag,
             vc_tag,
+            t().style.name(),
             self.tiling.preset.name(),
             focused_tag,
             if self.pending_ai { "live" } else { "idle" },
@@ -2362,55 +2789,79 @@ impl App {
     }
 
     fn render_messages_inner(&self, frame: &mut Frame, inner: Rect) {
-        let mut lines = Vec::new();
+        // Rows are pre-wrapped here (text) or taken verbatim (art), so the
+        // scroll math is exact and art never gets sheared by word-wrapping.
+        enum Row<'a> {
+            Text(Line<'a>),
+            Art { block: &'a art::ArtBlock, row: u16 },
+        }
+
+        let width = inner.width.max(1) as usize;
+        let text_width = width.saturating_sub(2).max(1);
+        let mut rows: Vec<Row> = Vec::new();
+        let muted = t().muted;
+        let text_color = t().text;
+        let tag_color = t().accent2;
+
         for message in &self.messages {
             let tag = match message.kind {
                 MessageKind::User => "USER",
                 MessageKind::Assistant => "AI",
                 MessageKind::Shell => "OPS",
                 MessageKind::System => "SYS",
+                MessageKind::Art => "ART",
             };
-            lines.push(Line::from(vec![
+            rows.push(Row::Text(Line::from(vec![
                 Span::styled(
                     format!("{} ", message.label),
                     Style::default().fg(message.accent).bold(),
                 ),
-                Span::styled(format!("[{}]", tag), Style::default().fg(t().accent2)),
-            ]));
+                Span::styled(format!("[{}]", tag), Style::default().fg(tag_color)),
+            ])));
 
-            if message.content.is_empty() {
-                lines.push(Line::from(Span::styled(
+            if let Some(block) = &message.art {
+                for row in 0..block.height {
+                    rows.push(Row::Art { block, row });
+                }
+                rows.push(Row::Text(Line::from(Span::styled(
+                    format!("  {}", block.caption),
+                    Style::default().fg(muted),
+                ))));
+            } else if message.content.is_empty() {
+                rows.push(Row::Text(Line::from(Span::styled(
                     "  . . .",
-                    Style::default().fg(t().muted),
-                )));
+                    Style::default().fg(muted),
+                ))));
             } else {
+                let color = match message.kind {
+                    MessageKind::System => Color::Rgb(171, 183, 192),
+                    _ => text_color,
+                };
                 for content_line in message.content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", content_line),
-                        Style::default().fg(match message.kind {
-                            MessageKind::System => Color::Rgb(171, 183, 192),
-                            _ => t().text,
-                        }),
-                    )));
+                    for wrapped in wrap_line(content_line, text_width) {
+                        rows.push(Row::Text(Line::from(Span::styled(
+                            format!("  {}", wrapped),
+                            Style::default().fg(color),
+                        ))));
+                    }
                 }
             }
-            lines.push(Line::from(""));
+            rows.push(Row::Text(Line::from("")));
         }
 
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No traffic yet. Ask the model something, !shell, /webcam, /3d, /server, or /connect.",
-                Style::default().fg(t().muted),
-            )));
+        if rows.is_empty() {
+            for wrapped in wrap_line(
+                "No traffic yet. Ask the model something, !shell, /art, /webcam, /3d, /server, or /connect.",
+                width,
+            ) {
+                rows.push(Row::Text(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(muted),
+                ))));
+            }
         }
 
-        // Estimate wrapped line count so scroll doesn't overshoot
-        let wrap_width = inner.width.max(1) as usize;
-        let total_wrapped: usize = lines.iter().map(|l| {
-            let w = l.width();
-            if w == 0 { 1 } else { (w + wrap_width - 1) / wrap_width }
-        }).sum();
-        let total_lines = total_wrapped.max(1);
+        let total_lines = rows.len().max(1);
         let visible_lines = inner.height as usize;
         let max_scroll = total_lines.saturating_sub(visible_lines);
         let scroll = if self.follow_tail {
@@ -2419,11 +2870,21 @@ impl App {
             self.scroll_lines.min(max_scroll)
         };
 
-        let widget = Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll as u16, 0))
-            .style(Style::default().bg(t().panel_bg));
-        frame.render_widget(widget, inner);
+        let panel_bg = t().panel_bg;
+        let buffer = frame.buffer_mut();
+        for (i, row) in rows.iter().skip(scroll).take(visible_lines).enumerate() {
+            let y = inner.y + i as u16;
+            match row {
+                Row::Text(line) => {
+                    buffer.set_line(inner.x, y, line, inner.width);
+                }
+                Row::Art { block, row } => {
+                    // Two-column indent to match text; clip on the right if
+                    // the panel is narrower than the art was generated for.
+                    block.blit_row(buffer, inner.x + 2, y, *row, inner.width.saturating_sub(2), panel_bg);
+                }
+            }
+        }
     }
 
     fn render_video_panel(&self, frame: &mut Frame, area: Rect, phase: f32) {
@@ -2666,11 +3127,16 @@ impl App {
     }
 
     fn render_videochat_feeds(&self, frame: &mut Frame, area: Rect, _phase: f32) {
+        let title = match &self.video_chat {
+            Some(vc) if vc.is_connected() => " VIDEO CHAT // LIVE ",
+            Some(_) => " VIDEO CHAT // CONNECTING ",
+            None => " VIDEO CHAT // OFFLINE ",
+        };
         let block = Block::default()
-            .title(" VIDEO CHAT // LIVE FEEDS ")
+            .title(title)
             .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
-            .border_type(BorderType::Double)
+            .border_type(t().border)
             .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, area);
 
@@ -2679,79 +3145,74 @@ impl App {
             vertical: 1,
         });
 
-        if let Some(ref vc) = self.video_chat {
-            let frames = vc.remote_frames.read();
-            if frames.is_empty() {
-                if let Some(ref local) = *vc.local_frame.read() {
-                    render_ascii_frame(frame.buffer_mut(), inner, local, 0.9);
-                    render_gradient_text(
-                        frame.buffer_mut(),
-                        inner.x + 1,
-                        inner.y,
-                        &format!("{} (you)", self.username),
-                        t().accent4,
-                        t().text,
-                    );
-                } else {
-                    frame.render_widget(
-                        Paragraph::new("waiting for video feeds...")
-                            .style(Style::default().fg(t().muted).bg(t().panel_bg))
-                            .alignment(Alignment::Center),
-                        inner,
-                    );
-                }
-            } else {
-                let count = frames.len().min(4);
-                let cols = if count <= 2 { count } else { 2 };
-                let rows = (count + cols - 1) / cols;
-
-                let row_constraints: Vec<Constraint> = (0..rows)
-                    .map(|_| Constraint::Percentage((100 / rows) as u16))
-                    .collect();
-                let row_layout = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints(row_constraints)
-                    .split(inner);
-
-                let mut frame_iter = frames.iter();
-                for r in 0..rows {
-                    let col_constraints: Vec<Constraint> = (0..cols)
-                        .map(|_| Constraint::Percentage((100 / cols) as u16))
-                        .collect();
-                    let col_layout = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints(col_constraints)
-                        .split(row_layout[r]);
-
-                    for c in 0..cols {
-                        if let Some((uname, ascii_frame)) = frame_iter.next() {
-                            let cell_area = col_layout[c];
-                            render_ascii_frame(frame.buffer_mut(), cell_area, ascii_frame, 0.85);
-                            let is_self = uname == &self.username;
-                            let label = if is_self {
-                                format!("{} (you)", uname)
-                            } else {
-                                uname.clone()
-                            };
-                            render_gradient_text(
-                                frame.buffer_mut(),
-                                cell_area.x + 1,
-                                cell_area.y,
-                                &label,
-                                if is_self { t().accent3 } else { t().accent4 },
-                                t().text,
-                            );
-                        }
-                    }
-                }
-            }
-        } else {
+        let Some(vc) = &self.video_chat else {
             frame.render_widget(
-                Paragraph::new("not connected. use /server <port> or /connect ws://<addr>")
+                Paragraph::new("not connected. /server <port> to host, /connect <ip>:<port> to join")
                     .style(Style::default().fg(t().muted).bg(t().panel_bg))
-                    .alignment(Alignment::Center),
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
                 inner,
             );
+            return;
+        };
+
+        // Remote participants first, then our own camera as the last tile.
+        let remote = vc.remote_frames.read();
+        let mut feeds: Vec<(String, &video::AsciiFrame, bool)> = remote
+            .values()
+            .map(|(name, f)| (name.clone(), f, false))
+            .collect();
+        feeds.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(local) = &self.webcam_frame {
+            feeds.push((format!("{} (you)", self.username), local, true));
+        }
+
+        if feeds.is_empty() {
+            let msg = if vc.is_connected() {
+                "connected -- waiting for participants (F5 turns your camera on)".to_string()
+            } else {
+                vc.get_status()
+            };
+            frame.render_widget(
+                Paragraph::new(msg)
+                    .style(Style::default().fg(t().muted).bg(t().panel_bg))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
+                inner,
+            );
+            return;
+        }
+
+        let count = feeds.len().min(4);
+        let cols = if count <= 2 { count } else { 2 };
+        let rows = count.div_ceil(cols);
+        let row_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
+            .split(inner);
+
+        let mut feed_iter = feeds.iter().take(count);
+        for row_area in row_layout.iter() {
+            let col_layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
+                .split(*row_area);
+            for cell_area in col_layout.iter() {
+                let Some((label, ascii_frame, is_self)) = feed_iter.next() else { break };
+                if cell_area.width < 4 || cell_area.height < 3 {
+                    continue;
+                }
+                render_ascii_frame(frame.buffer_mut(), *cell_area, ascii_frame, 0.85);
+                let label = truncate(label, cell_area.width.saturating_sub(2) as usize);
+                render_gradient_text(
+                    frame.buffer_mut(),
+                    cell_area.x + 1,
+                    cell_area.y,
+                    &label,
+                    if *is_self { t().accent3 } else { t().accent4 },
+                    t().text,
+                );
+            }
         }
     }
 
@@ -2881,7 +3342,7 @@ impl App {
             .title_style(Style::default().fg(t().accent4).bold())
             .borders(Borders::ALL)
             .border_style(Style::default().fg(t().accent3))
-            .border_type(BorderType::Double);
+            .border_type(t().border);
         frame.render_widget(block, area);
 
         let inner = area.inner(Margin {
@@ -2945,6 +3406,42 @@ impl App {
                 .wrap(Wrap { trim: false }),
             inner,
         );
+
+        // Slash-command autocomplete popup, floating above the input box.
+        let suggestions = self.autocomplete_suggestions();
+        if !suggestions.is_empty() {
+            let width = 72.min(area.width.saturating_sub(2)).max(20);
+            let height = (suggestions.len() as u16 + 2).min(area.y.max(3));
+            let list_area = Rect {
+                x: area.x + 1,
+                y: area.y.saturating_sub(height),
+                width,
+                height,
+            };
+            let highlight = self.autocomplete_index.min(suggestions.len() - 1);
+            let items: Vec<ratatui::widgets::ListItem> = suggestions
+                .iter()
+                .enumerate()
+                .map(|(i, (cmd, desc))| {
+                    let text = format!(" {:<16} {}", cmd, desc);
+                    if i == highlight {
+                        ratatui::widgets::ListItem::new(text)
+                            .style(Style::default().bg(t().accent1).fg(t().bg_base).bold())
+                    } else {
+                        ratatui::widgets::ListItem::new(text).style(Style::default().fg(t().text))
+                    }
+                })
+                .collect();
+            let block = Block::default()
+                .title(" Tab/Enter apply // Up/Down pick ")
+                .title_style(Style::default().fg(t().accent2))
+                .borders(Borders::ALL)
+                .border_type(t().border_alt)
+                .border_style(Style::default().fg(t().accent2))
+                .style(Style::default().bg(t().panel_bg));
+            frame.render_widget(Clear, list_area);
+            frame.render_widget(ratatui::widgets::List::new(items).block(block), list_area);
+        }
     }
 
     fn render_ollama_overlay(&self, frame: &mut Frame, area: Rect) {
@@ -2959,7 +3456,7 @@ impl App {
             .title(title)
             .title_style(Style::default().fg(self.provider.color()).bold())
             .borders(Borders::ALL)
-            .border_type(BorderType::Double)
+            .border_type(t().border)
             .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, popup);
 
@@ -3064,7 +3561,7 @@ impl App {
             .title(" HELP // ASCIIVISION v2 OPERATIONS MANUAL ")
             .title_style(Style::default().fg(t().accent1).bold())
             .borders(Borders::ALL)
-            .border_type(BorderType::Double)
+            .border_type(t().border)
             .border_style(Style::default().fg(t().accent1));
         frame.render_widget(block, popup);
 
@@ -3079,11 +3576,11 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("VIDEO CHAT ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/server <port>, /connect ws://<addr>, /chat <msg>", Style::default().fg(t().text)),
+                Span::styled("/server <port> hosts and joins a room, /connect <ip>:<port> joins one, /chat <msg> talks; your F5 webcam is streamed", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
                 Span::styled("VIDEO BUS  ", Style::default().fg(t().accent2).bold()),
-                Span::styled("/video toggles the panel, /youtube <url> streams YouTube into it", Style::default().fg(t().text)),
+                Span::styled("/video toggles the panel, /video <path> loads any local file, /youtube <url> streams YouTube into it", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
                 Span::styled("WEBCAM     ", Style::default().fg(t().accent2).bold()),
@@ -3106,6 +3603,14 @@ impl App {
                 Span::styled("/tiles or /tiles <1-8> boots real PTY terminals inside a focused tile; Ctrl+j/k cycle inner terminals, Ctrl+h/l move app focus", Style::default().fg(t().text)),
             ]),
             Line::from(vec![
+                Span::styled("ART        ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/art [generator] [seed] [--size WxH] draws procedural art in the transcript; /art list; F12 random; the AI can call generate_art", Style::default().fg(t().text)),
+            ]),
+            Line::from(vec![
+                Span::styled("THEMES     ", Style::default().fg(t().accent2).bold()),
+                Span::styled("/theme classic|blocks|braille|minimal|wireframe|depth3d change glyphs, borders and art rendering; F11 cycles, F9 re-rolls hues", Style::default().fg(t().text)),
+            ]),
+            Line::from(vec![
                 Span::styled("SHORTCUTS  ", Style::default().fg(t().accent2).bold()),
                 Span::styled("/curl, /brew, /provider, /ollama, /video, /youtube, /clear, /help, /username, /games, /tiles", Style::default().fg(t().text)),
             ]),
@@ -3119,10 +3624,13 @@ impl App {
             Line::from("  F6       cycle tiling layout preset"),
             Line::from("  F7       boot/focus the Tiles PTY panel"),
             Line::from("  F8       cycle focused tile panel type"),
-            Line::from("  F9       randomize color theme"),
+            Line::from("  F9       randomize palette within the active theme style"),
             Line::from("  F10      reset theme to defaults"),
+            Line::from("  F11      cycle theme style (classic, blocks, braille, minimal, wireframe, depth3d)"),
+            Line::from("  F12      random procedural art in the transcript"),
             Line::from("  Ctrl+L   clear transcript"),
-            Line::from("  PgUp/Dn  scroll transcript"),
+            Line::from("  PgUp/Dn  scroll transcript (or this overlay while it is open)"),
+            Line::from("  Tab      autocomplete a slash command"),
             Line::from("  Esc      exit"),
             Line::from(""),
             Line::from(Span::styled("Tiling (Hyprland-style)", Style::default().fg(t().accent4).bold())),
@@ -3140,7 +3648,8 @@ impl App {
             Line::from("  AI Chat: Claude 4.5, Grok 4, GPT-5, Gemini 3 Flash, local Ollama models"),
             Line::from("  Video: MP4 ASCII playback | Webcam: Live camera ASCII feed"),
             Line::from("  Video Chat: WebSocket multi-user streaming"),
-            Line::from("  3D FX: matrix, plasma, starfield, wireframe, fire, particles"),
+            Line::from("  3D FX: matrix, plasma, starfield, wireframe, fire, particles, theme solid"),
+            Line::from("  Art: 17 procedural generators (fractals, automata, L-systems, attractors, 3D solids)"),
             Line::from("  Games: Pac-Man, Space Invaders, 3D Penguin"),
             Line::from("  Tiles: 1-8 live PTY terminals for codex / claude / gemini / shell work"),
             Line::from("  Sys Monitor: CPU, memory, swap, network, load average"),
@@ -3148,14 +3657,33 @@ impl App {
             Line::from("  Shell: Full bash, curl, brew integration"),
         ]);
 
+        let inner = popup.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        let total_lines = text.lines.len();
+        let max_scroll = total_lines.saturating_sub(inner.height as usize);
+        let scroll = self.help_scroll.min(max_scroll);
         frame.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
+                .scroll((scroll as u16, 0))
                 .style(Style::default().fg(t().text).bg(t().panel_bg)),
-            popup.inner(Margin {
-                horizontal: 2,
-                vertical: 1,
-            }),
+            inner,
+        );
+
+        // Scroll hint on the bottom border of the popup.
+        let hint = if max_scroll == 0 {
+            " Esc/F1 close ".to_string()
+        } else {
+            format!(" {}/{} // PgUp/PgDn scroll // Esc/F1 close ", scroll + 1, max_scroll + 1)
+        };
+        let hx = popup.x + popup.width.saturating_sub(hint.chars().count() as u16 + 2);
+        frame.buffer_mut().set_string(
+            hx.max(popup.x + 1),
+            popup.y + popup.height.saturating_sub(1),
+            &hint,
+            Style::default().fg(t().accent2).bg(t().panel_bg),
         );
     }
 }
@@ -3665,6 +4193,76 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Greedy word wrap on character count. Breaks at the last space that fits,
+/// or mid-word when a single token is wider than the line.
+fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let end = (start + width).min(chars.len());
+        if end == chars.len() {
+            out.push(chars[start..end].iter().collect());
+            break;
+        }
+        let mut split = end;
+        if let Some(pos) = chars[start..end].iter().rposition(|c| *c == ' ') {
+            if pos > 0 {
+                split = start + pos;
+            }
+        }
+        out.push(chars[start..split].iter().collect());
+        start = split;
+        while start < chars.len() && chars[start] == ' ' {
+            start += 1;
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// `--art` mode: render one block with 24-bit ANSI color to stdout, no TUI.
+fn print_art_to_stdout(spec_text: &str, theme_name: Option<&str>) -> Result<()> {
+    use std::io::Write;
+    if let Some(name) = theme_name {
+        match theme::ThemeStyle::from_name(name) {
+            Some(style) => theme::set_style(style),
+            None => anyhow::bail!(
+                "unknown theme '{}'; options: {}",
+                name,
+                theme::ThemeStyle::ALL.iter().map(|s| s.name()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+    if spec_text.trim() == "list" {
+        println!("{}", art::Generator::list_text());
+        return Ok(());
+    }
+    let fallback_seed = rand::thread_rng().gen_range(0..1_000_000u64);
+    let spec = art::ArtSpec::parse(spec_text, fallback_seed, 82).map_err(|e| anyhow::anyhow!(e))?;
+    let block = art::render(&spec, &t());
+    let mut out = std::io::stdout().lock();
+    for y in 0..block.height {
+        for x in 0..block.width {
+            let cell = block.cell(x, y);
+            match cell.bg {
+                Some((r, g, b)) => write!(out, "\x1b[48;2;{};{};{}m", r, g, b)?,
+                None => write!(out, "\x1b[49m")?,
+            }
+            write!(out, "\x1b[38;2;{};{};{}m{}", cell.fg.0, cell.fg.1, cell.fg.2, cell.ch)?;
+        }
+        writeln!(out, "\x1b[0m")?;
+    }
+    writeln!(out, "{}", block.caption)?;
+    Ok(())
+}
+
 fn truncate(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         value.to_string()
@@ -3709,13 +4307,9 @@ async fn run_app(
     let mut app = App::new(args)?;
 
     if let Some(url) = connect_url {
-        let client = VideoChatClient::new(username.clone(), url.clone());
-        app.video_chat = Some(client);
-        app.tiling.set_focused_panel(PanelKind::VideoChatFeeds);
-        app.add_system_message(format!(
-            "video chat primed for {} as {} -- type /connect {} to go live",
-            url, username, url
-        ));
+        let url = if url.contains("://") { url } else { format!("ws://{}", url) };
+        app.add_system_message(format!("--connect: joining {} as {}", url, username));
+        app.start_video_chat(url, 0);
     }
 
     loop {
@@ -3751,6 +4345,10 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    if let Some(spec_text) = args.art.as_deref() {
+        return print_art_to_stdout(spec_text, args.theme.as_deref());
+    }
+
     // suppress ALL FFmpeg log output before anything else --
     // FFmpeg writes to stderr which corrupts the TUI display
     unsafe { ffmpeg_sys_next::av_log_set_level(ffmpeg_sys_next::AV_LOG_QUIET) };
@@ -3774,6 +4372,11 @@ async fn main() -> Result<()> {
         let _ = out.flush();
         std::thread::sleep(Duration::from_millis(150));
     }
+
+    // ASCIIVision is a full-color TUI; without color it is unusable. Crossterm
+    // honors the NO_COLOR convention and silently strips every color when that
+    // variable is set (shells spawned from some tools export it), so opt out.
+    crossterm::style::force_color_output(true);
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();

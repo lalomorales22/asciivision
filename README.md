@@ -26,7 +26,9 @@ ASCIIVision is a single Rust binary that packs an absurd amount of functionality
 - **Context Management** -- automatic summarization of older messages when the context window fills up, @-file injection, pinnable messages, persistent agent memory across sessions
 - **SQLite Persistence** -- all conversations and agent memory saved to `~/.config/asciivision/conversations.db`
 - **Cracktro Intro** -- animated boot sequence with starburst effects, raster bars, and scrolling ticker
-- **Dynamic Theme Engine** -- global color theme system with HSL-based random palette generation. F9 randomizes all UI colors on the fly, F10 resets to defaults. Every panel, border, accent, and background color is driven by the live theme.
+- **Procedural Art in the Chat** -- 17 deterministic generators (fractals, cellular automata, L-system plants, strange attractors, mazes, flow fields, 3D solids and terrain) drawn straight into the transcript with per-cell color. Reachable via `/art`, `F12`, or the AI calling its own `generate_art` tool mid-conversation. No image models, no network: same seed, same art, every time.
+- **Structural Themes** -- six named looks (`classic`, `blocks`, `braille`, `minimal`, `wireframe`, `depth3d`) that change glyph vocabulary, border treatment, video ramp, and how art is rasterized, not just the hues. `F11` cycles, `/theme <name>` picks, `F9` re-rolls colors within the current look, `F10` resets.
+- **3D Render Mode** -- a shared rotation / perspective / z-buffer / Lambert-lighting engine drives both the animated Effects3D panel and the 3D art generators. Braille themes get 2x4 sub-cell resolution; the `depth3d` theme shades by depth.
 
 Legacy companion apps (mega-cli, mega-analytics) are preserved in the `archive/` directory.
 
@@ -180,7 +182,11 @@ Options:
   --username <NAME>          Username for video chat [default: anon]
   --webcam                   Enable webcam capture on startup
   --effects                  Start with 3D effects active
+  --theme <NAME>             Start with a theme style: classic, blocks, braille, minimal, wireframe, depth3d
+  --art <SPEC>               Render procedural art to stdout (24-bit color) and exit, e.g. --art "torus 7 --size 80x30"
 ```
+
+`--art list` prints the generator catalogue. `--art` composes with `--theme`, so `asciivision --theme braille --art "mandelbrot 42"` is a quick way to preview a look without launching the TUI.
 
 ---
 
@@ -198,11 +204,14 @@ Options:
 | `F6` | Cycle tiling layout preset |
 | `F7` | Boot/focus the Tiles PTY panel |
 | `F8` | Cycle focused tile's panel type |
-| `F9` | Randomize color theme |
-| `F10` | Reset theme to defaults |
+| `F9` | Randomize palette hues within the active theme style |
+| `F10` | Reset theme to defaults (classic) |
+| `F11` | Cycle theme style: classic → blocks → braille → minimal → wireframe → depth3d |
+| `F12` | Drop a random piece of procedural art into the transcript |
 | `Ctrl+L` | Clear transcript |
 | `Ctrl+C` | Exit |
-| `Esc` | Exit (if input empty) / Clear input (if typing) |
+| `Esc` | Exit (if input empty) / Clear input (if typing) / Close help |
+| `Tab` | Autocomplete a slash command (inserts spaces otherwise) |
 | `PgUp/PgDn` | Scroll transcript |
 | `Number + Enter` | Choose an Ollama model while the picker is open |
 
@@ -222,7 +231,9 @@ Options:
 | `Ctrl+]` | Grow focused split |
 | `Ctrl+n` | Cycle focused tile to next panel type |
 
-The focused tile is highlighted with a double border.
+The focused tile is highlighted with the theme's primary border (double in `classic`, thick in `blocks`, rounded in `braille`, and so on).
+
+On macOS, `F11`/`F12` may be captured by the system (Mission Control / Show Desktop). Hold `Fn`, remap them in System Settings, or use `/theme next` and `/art` instead.
 
 ---
 
@@ -236,6 +247,7 @@ The focused tile is highlighted with a double border.
 | `/provider <name>` | Switch AI provider |
 | `/ollama` | Switch to Ollama and open the local model picker |
 | `/video` | Toggle video panel |
+| `/video <path>` | Load any local video file into the video bus (aspect-correct, paced to the source frame rate) |
 | `/youtube <url>` | Resolve and stream a YouTube video into the video panel using `yt-dlp` |
 | `/webcam` | Toggle webcam |
 | `/3d` or `/effects` | Toggle 3D effects |
@@ -248,14 +260,22 @@ The focused tile is highlighted with a double border.
 | `/sysmon` | Show system monitor in focused tile |
 | `/layout` | Cycle layout preset |
 | `/layout <name>` | Set layout: default, dual, triple, quad, webcam, focus |
-| `/server <port>` | Host WebSocket video chat server |
-| `/connect ws://<addr>` | Join video chat server |
+| `/server <port>` | Host a video chat room and join it yourself |
+| `/connect <ip>:<port>` | Join a video chat room (`ws://` prefix optional); starts your webcam and streams it |
 | `/chat <msg>` | Send message in video chat |
 | `/username <name>` | Set your video chat username |
 | `/clear` | Clear transcript |
-| `/randomize` | Randomize all UI colors |
-| `/theme reset` | Restore default color palette |
-| `/help` | Toggle help overlay |
+| `/art` | Render random procedural art in the transcript |
+| `/art <generator> [seed] [--seed N] [--size WxH]` | Render a specific generator, e.g. `/art mandelbrot 42`, `/art torus --size 60x24` |
+| `/art list` | List the 17 generators |
+| `/theme` or `/theme list` | List theme styles and mark the active one |
+| `/theme <name>` | Switch style: classic, blocks, braille, minimal, wireframe, depth3d |
+| `/theme next` | Cycle to the next style (same as F11) |
+| `/randomize` or `/theme random` | Randomize palette hues within the active style |
+| `/theme reset` | Restore the default classic theme |
+| `/help` | Toggle help overlay (PgUp/PgDn scroll it, Esc closes) |
+
+Type `/` and the first letters of a command to get an autocomplete popup: `Tab` or `Enter` fills in the highlighted entry, `Up`/`Down` move the highlight.
 
 `./install.sh` installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and Ollama for you. If you do a manual setup, make sure both are installed and available before using `/youtube` or the Ollama provider.
 `/youtube` now streams directly into the video bus by resolving a playable media URL first, so it no longer has to cache the full video before playback starts.
@@ -301,9 +321,64 @@ Focus a tile and press `F8` or `Ctrl+n` until it becomes `TILES`, press `F7`, or
 
 ---
 
+## Procedural Art
+
+Art is generated in Rust from a seed, never downloaded and never produced by a model. The pipeline has three stages:
+
+```
+Generator ──► Scene ──► theme rasterizer ──► glyph cells
+(seed, size)  (field / strokes / mesh)   (glyphs + per-cell color)
+```
+
+The theme decides what a scene *looks like*, so `/art mandelbrot 42` renders as a 69-step ASCII ramp under `classic`, as half-block pixels under `blocks`, as a 2x4 braille dot matrix under `braille`, and as a depth-shaded relief under `depth3d`.
+
+| Generator | What it draws |
+|-----------|---------------|
+| `automaton` | 1D cellular automaton (rule 30 / 90 / 110 family) |
+| `life` | Game of Life snapshot with fading trails |
+| `noise` | Domain-warped fractal value noise |
+| `mandelbrot` | Escape-time Mandelbrot zoom on a seed-chosen spot |
+| `julia` | Escape-time Julia set |
+| `maze` | Recursive-backtracker maze, rainbow by carve order |
+| `attractor` | Clifford strange attractor density plot |
+| `voronoi` | Voronoi cells with dark boundaries |
+| `flow` | Particles traced through a noise flow field |
+| `plant` | L-system plant (five rule sets) |
+| `truchet` | Truchet arc tiles |
+| `lissajous` | Lissajous / harmonograph curves |
+| `cube`, `torus`, `sphere`, `icosahedron` | Rotating 3D solids: filled + lit under blocks/braille/depth3d, wireframe under classic/wireframe/minimal |
+| `terrain` | 3D noise heightmap |
+
+Three ways to make art:
+
+1. `/art [generator] [seed] [--size WxH]` or `F12` for a random one.
+2. Ask the AI. It has a `generate_art` tool and will call it on its own when a picture would help ("draw me a torus", "show me rule 110"). The tool is non-destructive, so it never prompts for approval. The model receives a short description plus a tiny monochrome thumbnail, never the full block, so the context window stays small.
+3. `asciivision --art "<spec>"` on the command line.
+
+Art blocks are static: one frame is rendered under the theme active at that moment, sized to the transcript's width, and committed to the history. Wide blocks are clipped on the right if the terminal is later shrunk; they are never re-wrapped. Animated 3D lives in the Effects3D panel (`F4` to the `THEME 3D SOLID` effect), which re-renders every frame under whatever theme is active.
+
+---
+
+## Themes
+
+A theme is a render target, not just a palette. Each style bundles eleven colors with a glyph ramp, a border treatment, and an art rasterizer:
+
+| Style | Glyphs | Borders | Feel |
+|-------|--------|---------|------|
+| `classic` | 69-step ASCII luminance ramp | double / plain | the original teal/amber look (default) |
+| `blocks` | `▀▄` half-block pixels + `░▒▓█` | thick | neon poster, solid color fills |
+| `braille` | U+2800..U+28FF, 2x4 dots per cell | rounded | highest fidelity, ice-blue/violet |
+| `minimal` | `·:-=+*#` | plain | restrained two-tone mono |
+| `wireframe` | `─│╱╲┼` box drawing | double / plain | phosphor-green CAD |
+| `depth3d` | ramp indexed by lighting, color by depth | quadrant blocks | sunset palette, relief shading |
+
+The style also drives the video and webcam ASCII ramp, so switching to `blocks` restyles the live video bus too. `F9` and `/theme random` re-roll the hues *within* the current style; `F11` or `/theme <name>` changes the style itself.
+
+---
+
 ## 3D Effects
 
-Six terminal-rendered visual effects, cycled with `F4` or `/fx`, then turned off on the next cycle:
+Seven terminal-rendered visual effects, cycled with `F4` or `/fx`, then turned off on the next cycle:
 
 1. **Rainbow Matrix Rain** -- cascading characters with per-column rainbow hues that drift over time, white head glow, color-tinted backgrounds
 2. **Plasma Field** -- RGB sine-wave interference patterns with smooth color cycling
@@ -311,6 +386,9 @@ Six terminal-rendered visual effects, cycled with `F4` or `/fx`, then turned off
 4. **Wireframe 3D** -- rotating cube rendered with ASCII line-drawing and labeled vertices
 5. **Fire Simulation** -- bottom-up flame propagation with heat diffusion and ember colors
 6. **Particle Storm** -- multi-colored particles exploding from center with gravity and fade
+7. **Theme 3D Solid** -- a torus, icosahedron, cube, sphere and terrain take turns rotating, rendered through the art pipeline so they are filled and lit under `blocks`/`braille`/`depth3d` and wireframe under `classic`/`wireframe`/`minimal`
+
+The wireframe cube and the art generators share one 3D implementation in `src/art/render3d.rs` (rotation, perspective with depth, terminal cell-aspect correction, z-buffer, Lambert shading).
 
 ---
 
@@ -341,6 +419,8 @@ Live camera capture converted to ASCII art using FFmpeg's AVFoundation (macOS), 
 ---
 
 ## WebSocket Video Chat
+
+`/server 8000` hosts a room on all interfaces and joins it as you. Anyone on the network runs `/connect 192.168.1.20:8000`. Both sides get their webcam started automatically and every participant's camera is encoded as colored ASCII and streamed over the socket; the feeds panel tiles up to four participants with your own camera as the last tile.
 
 Host a server and connect clients for multi-user live ASCII webcam streaming in the terminal.
 
@@ -374,16 +454,22 @@ asciivision/
 ├── src/
 │   ├── main.rs          # App shell: modes, rendering, input dispatch, tiling integration
 │   ├── ai.rs            # Multi-provider AI client with streaming (Claude, Grok, GPT-5, Gemini, Ollama)
-│   ├── tools.rs         # Agentic tool definitions and execution (shell, files, search, HTTP, sysinfo)
+│   ├── tools.rs         # Agentic tool definitions and execution (shell, files, search, HTTP, sysinfo, generate_art)
 │   ├── memory.rs        # Persistent agent memory (SQLite-backed key-value store)
 │   ├── video.rs         # FFmpeg-based MP4 to ASCII art decoder
 │   ├── webcam.rs        # Live webcam capture with ASCII conversion + error reporting
 │   ├── shell.rs         # Async shell command execution with timeout
 │   ├── db.rs            # SQLite conversation persistence
 │   ├── tiling.rs        # Binary-tree tiling window manager with 6 presets + min-size enforcement
-│   ├── theme.rs         # Global dynamic color theme engine with HSL random palette generation
+│   ├── theme.rs         # Theme engine: 6 structural styles (glyph ramp, borders, palette) + HSL randomization
+│   ├── art/
+│   │   ├── mod.rs       # Scene IR, Generator catalogue, ArtSpec parsing, ArtBlock (rendered cells)
+│   │   ├── generators.rs# 17 deterministic generators (fields, strokes, meshes)
+│   │   ├── raster.rs    # Sub-cell Raster + per-style rasterizers (braille, half-block, ramp, box-drawing, depth)
+│   │   ├── render3d.rs  # Shared 3D: rotate/project/z-buffer/lighting + cube/torus/sphere/icosahedron/terrain
+│   │   └── rng.rs       # splitmix64 PRNG + value noise / fBm (seed-deterministic)
 │   ├── sysmon.rs        # System monitor (CPU, memory, network, load)
-│   ├── effects.rs       # 3D terminal effects engine (6 effects, rainbow matrix)
+│   ├── effects.rs       # 3D terminal effects engine (7 effects, rainbow matrix, theme solid)
 │   ├── analytics.rs     # Conversation analytics dashboard with bar charts
 │   ├── server.rs        # WebSocket video chat server (multi-user broadcast)
 │   ├── client.rs        # WebSocket video chat client (webcam + chat)

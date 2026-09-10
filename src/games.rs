@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use rand::{prelude::SliceRandom, Rng};
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use std::{collections::HashSet, f32::consts::PI};
 
@@ -210,9 +210,9 @@ impl GamesPanel {
             .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
             .border_type(if is_focused {
-                BorderType::Double
+                t().border
             } else {
-                BorderType::Plain
+                t().border_alt
             })
             .border_style(Style::default().fg(border_color));
         frame.render_widget(block, area);

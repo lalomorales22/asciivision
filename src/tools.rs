@@ -171,6 +171,32 @@ pub fn all_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "generate_art".to_string(),
+            description: "Render deterministic procedural art (no image models, no network) directly into the user's chat transcript, drawn with the active theme's glyphs and colors. Use it when the user asks for art, a picture, a pattern, a fractal, a 3D shape, or when a visual would enliven the conversation. Same generator + seed always gives the same art; the user sees it in full color. Generators: automaton, life, noise, mandelbrot, julia, maze, attractor, voronoi, flow, plant, truchet, lissajous, cube, torus, sphere, icosahedron, terrain.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "generator": {
+                        "type": "string",
+                        "description": "One of: automaton, life, noise, mandelbrot, julia, maze, attractor, voronoi, flow, plant, truchet, lissajous, cube, torus, sphere, icosahedron, terrain"
+                    },
+                    "seed": {
+                        "type": "integer",
+                        "description": "Seed for deterministic output (optional, random if omitted)"
+                    },
+                    "width": {
+                        "type": "integer",
+                        "description": "Width in terminal cells (optional, defaults to fit the transcript; max 200)"
+                    },
+                    "height": {
+                        "type": "integer",
+                        "description": "Height in terminal rows (optional, default ~width/2.6; max 80)"
+                    }
+                },
+                "required": ["generator"]
+            }),
+        },
+        ToolDefinition {
             name: "get_system_info".to_string(),
             description: "Get current system information: CPU, memory, disk, network".to_string(),
             parameters: serde_json::json!({
@@ -190,6 +216,7 @@ pub async fn execute_tool(call: &ToolCall) -> ToolResult {
         "search_files" => execute_search_files(&call.arguments).await,
         "http_request" => execute_http_request(&call.arguments).await,
         "get_system_info" => execute_get_system_info(&call.arguments).await,
+        "generate_art" => execute_generate_art(&call.arguments),
         _ => Err(anyhow!("unknown tool: {}", call.name)),
     };
 
@@ -338,6 +365,49 @@ async fn execute_http_request(args: &serde_json::Value) -> Result<String> {
     } else {
         Ok(result)
     }
+}
+
+/// Validate a `generate_art` call and hand the model a short description
+/// plus a small monochrome thumbnail. The full-color block is rendered by the
+/// UI from the same arguments, so the model never receives thousands of glyphs.
+fn execute_generate_art(args: &serde_json::Value) -> Result<String> {
+    use crate::art::{ArtSpec, Generator};
+    use crate::theme::{current_style, Theme, ThemeStyle};
+
+    let generator_name = args
+        .get("generator")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing 'generator' argument"))?;
+    let generator = Generator::from_name(generator_name).ok_or_else(|| {
+        anyhow!(
+            "unknown generator '{}'. options: {}",
+            generator_name,
+            Generator::ALL.iter().map(|g| g.name()).collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    let seed = args
+        .get("seed")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| rand::random::<u64>() % 1_000_000);
+    let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(64) as u16;
+    let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+    let spec = ArtSpec::new(generator, seed, width, height);
+
+    // A tiny classic-ramp thumbnail so the model can talk about what it made.
+    let thumb = ArtSpec::new(generator, seed, 36, 12);
+    let thumb_block = crate::art::render(&thumb, &Theme::for_style(ThemeStyle::Classic));
+
+    Ok(format!(
+        "rendered procedural art in the user's transcript: generator={} seed={} size={}x{} theme={}. \
+The user sees it in full color; do not attempt to reproduce it in text. \
+Low-res monochrome thumbnail for reference:\n{}",
+        generator.name(),
+        seed,
+        spec.width,
+        spec.height,
+        current_style().name(),
+        thumb_block.to_plain_text()
+    ))
 }
 
 async fn execute_get_system_info(_args: &serde_json::Value) -> Result<String> {

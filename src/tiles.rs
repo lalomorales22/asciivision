@@ -6,7 +6,7 @@ use portable_pty::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use std::{
     env,
@@ -122,9 +122,9 @@ impl TilesPanel {
             .title_style(Style::default().fg(t().accent2).bold())
             .borders(Borders::ALL)
             .border_type(if is_focused {
-                BorderType::Double
+                t().border
             } else {
-                BorderType::Plain
+                t().border_alt
             })
             .border_style(Style::default().fg(border_color));
         frame.render_widget(block, area);
@@ -184,9 +184,9 @@ impl TilesPanel {
                 .title_style(Style::default().fg(if is_active { t().accent2 } else { t().accent4 }).bold())
                 .borders(Borders::ALL)
                 .border_type(if is_active {
-                    BorderType::Double
+                    t().border
                 } else {
-                    BorderType::Plain
+                    t().border_alt
                 })
                 .border_style(Style::default().fg(border));
             frame.render_widget(block, rect);
