@@ -300,12 +300,16 @@ Every tile can be reassigned to any of 13 panel types: Transcript, Games, Tiles,
 
 ## Games Window
 
-Focus a tile and press `F8` or `Ctrl+n` until it becomes `GAMES`, or run `/games`.
+`/games` (or focusing a tile and pressing F8 until it shows GAMES) opens the arcade bay. Pick with `1`-`4` or Up/Down and Enter. In any game `P` pauses, `R` restarts, `Esc` returns to the menu. High scores persist in `~/.config/asciivision/highscores.json` and show in the menu and the panel title.
 
-- **Selection** -- `1`, `2`, `3`, arrow keys, or `WASD` choose between Pac-Man, Space Invaders, and 3D Penguin
-- **Launch** -- `Enter` or `Space`
-- **Play** -- `WASD` control the active game while the Games tile is focused and the input prompt is empty
-- **Reset / Exit** -- `R` restarts the current game, `Esc` returns to the games selector
+| Game | What it is | Controls |
+|------|------------|----------|
+| **Pac-Man** | The maze at true tile scale with box-drawing walls, four ghost personalities (chaser, ambusher, flanker, shy), scatter/chase cycles, power pellets with a 200/400/800/1600 catch chain, ghosts returning home as eyes, fruit, READY countdown, death and level-clear animations | WASD or arrows |
+| **Space Invaders** | Three animated squadron types, destructible bunkers, a mystery UFO, smooth held-key movement, a shield pulse, particle explosions, waves that speed up as the squadron thins | A/D move, W or Space fire, S shield |
+| **Penguin Ice Caves** | A first-person raycast maze (DDA raycasting, distance fog, side shading, depth-sorted sprites). Collect every fish before the clock runs out while seals patrol; each fish adds time, seals steal it. Fog-of-war minimap, falling snow, new maze every level | W/S move, A/D turn, Q/E strafe |
+| **Blockdrop** | Tetris with a 7-bag randomizer, hold, ghost piece, hard drop, wall kicks, line-clear flash with particles, next-piece preview and level speed-up | A/D move, W rotate, Q rotate back, S soft drop, Space hard drop, C hold |
+
+Games are drawn into a back buffer and scale to the tile: Pac-Man draws two cells per tile when it has room and falls back to one, the invaders switch to single-character sprites in narrow tiles, and Blockdrop drops to one-column cells.
 
 ---
 
