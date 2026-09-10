@@ -31,6 +31,54 @@ err()     { printf "${RED}[ERROR]${RESET} %s\n" "$*" >&2; }
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ASCIIVision pins the FFmpeg 8.x ABI. ffmpeg-next 9.x (Cargo.toml) matches
+# exhaustively over FFmpeg's enums, so a newer FFmpeg major fails to compile.
+# On macOS we install the keg-only ffmpeg@8: its prefix never repoints, so an
+# already-installed binary keeps resolving its dylibs across `brew upgrade`.
+FFMPEG_BREW_FORMULA="ffmpeg@8"
+FFMPEG_LIBAVUTIL_MAJOR=60   # libavutil 60 == FFmpeg 8.x
+
+prepend_path_var() {
+    local var_name="$1"
+    local value="$2"
+    if [[ -z "${!var_name:-}" ]]; then
+        export "${var_name}=${value}"
+    else
+        export "${var_name}=${value}:${!var_name}"
+    fi
+}
+
+# Point pkg-config at the pinned keg (macOS only; no-op elsewhere).
+use_pinned_ffmpeg() {
+    has_cmd brew || return 1
+    local prefix
+    prefix="$(brew --prefix "${FFMPEG_BREW_FORMULA}" 2>/dev/null || true)"
+    [[ -n "${prefix}" && -d "${prefix}/lib/pkgconfig" ]] || return 1
+    prepend_path_var PKG_CONFIG_PATH "${prefix}/lib/pkgconfig"
+    [[ -d "${prefix}/include" ]] && prepend_path_var CPATH "${prefix}/include"
+    return 0
+}
+
+# Fail early with an actionable message instead of ~60 lines of rustc E0004.
+verify_ffmpeg_abi() {
+    local found
+    found="$(pkg-config --modversion libavutil 2>/dev/null | cut -d. -f1 || true)"
+    if [[ -z "${found}" ]]; then
+        err "Cannot find FFmpeg development libraries (libavutil) via pkg-config."
+        err "  macOS: brew install ${FFMPEG_BREW_FORMULA}"
+        err "  Linux: install FFmpeg 8.x dev packages (libavutil-dev, libavcodec-dev, ...)"
+        exit 1
+    fi
+    if [[ "${found}" != "${FFMPEG_LIBAVUTIL_MAJOR}" ]]; then
+        err "FFmpeg ABI mismatch: found libavutil ${found}, need ${FFMPEG_LIBAVUTIL_MAJOR} (FFmpeg 8.x)."
+        err "ffmpeg-next 9.x only compiles against FFmpeg 8.x."
+        err "  macOS: brew install ${FFMPEG_BREW_FORMULA}"
+        err "  To target another FFmpeg, bump ffmpeg-next/ffmpeg-sys-next in Cargo.toml to match."
+        exit 1
+    fi
+    success "FFmpeg ABI OK (libavutil ${found} / FFmpeg 8.x)"
+}
+
 # ---------------------------------------------------------------------------
 # OS detection
 # ---------------------------------------------------------------------------
@@ -116,10 +164,13 @@ install_deps_macos() {
 
     local packages=()
 
-    if ! has_cmd ffmpeg; then
-        packages+=(ffmpeg)
+    # Note: ffmpeg@8 is keg-only, so `has_cmd ffmpeg` says nothing about whether
+    # it is installed -- and the unversioned `ffmpeg` binary may be a different
+    # major entirely. Check the keg prefix directly.
+    if [[ -d "$(brew --prefix "${FFMPEG_BREW_FORMULA}" 2>/dev/null || echo /nonexistent)/lib/pkgconfig" ]]; then
+        success "FFmpeg found (${FFMPEG_BREW_FORMULA}, pinned)"
     else
-        success "FFmpeg found"
+        packages+=("${FFMPEG_BREW_FORMULA}")
     fi
 
     if ! has_cmd pkg-config; then
@@ -298,7 +349,12 @@ build_project() {
         if [[ -d /usr/local/include ]]; then
             export CPATH="${CPATH:+${CPATH}:}/usr/local/include"
         fi
+
+        # Prepended last so the pinned keg wins over any unversioned ffmpeg above.
+        use_pinned_ffmpeg || true
     fi
+
+    verify_ffmpeg_abi
 
     cargo build --release
 

@@ -12,6 +12,51 @@ append_path_var() {
   fi
 }
 
+prepend_path_var() {
+  local var_name="$1"
+  local value="$2"
+  if [[ -z "${!var_name:-}" ]]; then
+    export "${var_name}=${value}"
+  else
+    export "${var_name}=${value}:${!var_name}"
+  fi
+}
+
+# ASCIIVision pins the FFmpeg 8.x ABI. ffmpeg-next 9.x matches exhaustively over
+# FFmpeg's enums, so a newer FFmpeg major fails to compile; and because a keg-only
+# formula's prefix never repoints, linking against it keeps an already-installed
+# binary working across `brew upgrade`.
+FFMPEG_BREW_FORMULA="ffmpeg@8"
+FFMPEG_LIBAVUTIL_MAJOR=60
+
+use_pinned_ffmpeg() {
+  command -v brew >/dev/null 2>&1 || return 1
+  local prefix
+  prefix="$(brew --prefix "${FFMPEG_BREW_FORMULA}" 2>/dev/null || true)"
+  [[ -n "${prefix}" && -d "${prefix}/lib/pkgconfig" ]] || return 1
+  prepend_path_var PKG_CONFIG_PATH "${prefix}/lib/pkgconfig"
+  [[ -d "${prefix}/include" ]] && prepend_path_var CPATH "${prefix}/include"
+  return 0
+}
+
+verify_ffmpeg_abi() {
+  local found
+  found="$(pkg-config --modversion libavutil 2>/dev/null | cut -d. -f1 || true)"
+  if [[ -z "${found}" ]]; then
+    echo "Cannot find FFmpeg development libraries (libavutil) via pkg-config." >&2
+    echo "  macOS: brew install ${FFMPEG_BREW_FORMULA}" >&2
+    echo "  Linux: install FFmpeg 8.x dev packages (libavutil-dev, libavcodec-dev, ...)" >&2
+    exit 1
+  fi
+  if [[ "${found}" != "${FFMPEG_LIBAVUTIL_MAJOR}" ]]; then
+    echo "FFmpeg ABI mismatch: found libavutil ${found}, need ${FFMPEG_LIBAVUTIL_MAJOR} (FFmpeg 8.x)." >&2
+    echo "ffmpeg-next 9.x only compiles against FFmpeg 8.x." >&2
+    echo "  macOS: brew install ${FFMPEG_BREW_FORMULA}" >&2
+    echo "  To target another FFmpeg, bump ffmpeg-next/ffmpeg-sys-next in Cargo.toml to match." >&2
+    exit 1
+  fi
+}
+
 OS="$(uname -s)"
 
 setup_macos() {
@@ -63,6 +108,9 @@ setup_macos() {
   if [[ -d /usr/local/include ]]; then
     append_path_var CPATH /usr/local/include
   fi
+
+  # Prepended last so the pinned keg wins over any unversioned ffmpeg above.
+  use_pinned_ffmpeg || true
 }
 
 setup_linux() {
@@ -101,6 +149,8 @@ case "${OS}" in
     exit 1
     ;;
 esac
+
+verify_ffmpeg_abi
 
 cargo build --release
 exec ./target/release/asciivision "$@"

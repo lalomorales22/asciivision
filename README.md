@@ -62,15 +62,15 @@ If you prefer to install dependencies yourself:
 #### Prerequisites
 
 - **Rust** 1.70+ ([rustup.rs](https://rustup.rs))
-- **FFmpeg** dev libraries
+- **FFmpeg 8.x** dev libraries -- the major version matters, see [FFmpeg version pinning](#ffmpeg-version-pinning)
 - **LLVM/libclang** (needed to compile ffmpeg-sys-next)
 - **pkg-config**
 - **yt-dlp** (for `/youtube`)
 - **Ollama** (for local model routing)
 
 ```bash
-# macOS
-brew install ffmpeg llvm pkg-config yt-dlp ollama
+# macOS -- note ffmpeg@8, not plain ffmpeg
+brew install ffmpeg@8 llvm pkg-config yt-dlp ollama
 
 # Ubuntu/Debian
 sudo apt install libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libavdevice-dev pkg-config libclang-dev build-essential yt-dlp
@@ -84,6 +84,38 @@ sudo pacman -S ffmpeg clang pkg-config base-devel yt-dlp
 # Ollama (Linux / WSL2 manual install)
 curl -fsSL https://ollama.com/install.sh | sh
 ```
+
+#### FFmpeg version pinning
+
+ASCIIVision builds against the **FFmpeg 8.x** ABI. This is pinned deliberately, in
+two places that must agree:
+
+| Where | Pin |
+|---|---|
+| `Cargo.toml` | `ffmpeg-next` / `ffmpeg-sys-next` `9.0` (these track FFmpeg 8.1) |
+| macOS install | `ffmpeg@8` (keg-only), **not** plain `ffmpeg` |
+
+Two separate things break if they drift apart:
+
+1. **Build breakage.** `ffmpeg-next` matches exhaustively over FFmpeg's `AVCodecID`,
+   `AVPacketSideDataType` and `AVFrameSideDataType` enums. A newer FFmpeg adds
+   variants the crate has no arm for, so the build fails with `E0004:
+   non-exhaustive patterns` *inside the crate itself*, before any project code
+   compiles.
+2. **Runtime breakage.** Homebrew's unversioned `/opt/homebrew/opt/ffmpeg` symlink
+   repoints on `brew upgrade`. Linking against it means a future FFmpeg major bumps
+   the dylib sonames (`libavutil.60` to `.61`) and an **already-installed** binary
+   dies with a dyld "Library not loaded" error -- no rebuild needed to break it.
+   The keg-only `ffmpeg@8` prefix never repoints, so the link stays valid.
+
+`install.sh` and `./asciivision` both prepend the pinned keg to `PKG_CONFIG_PATH`
+and verify the ABI before compiling, failing with a one-line explanation rather
+than a wall of compiler errors.
+
+**To move to a future FFmpeg major:** bump `ffmpeg-next` / `ffmpeg-sys-next` in
+`Cargo.toml` to a release that supports it, then update `FFMPEG_BREW_FORMULA` and
+`FFMPEG_LIBAVUTIL_MAJOR` at the top of `install.sh` and `asciivision` to match
+(`libavutil` major 60 = FFmpeg 8.x, 59 = 7.x, 58 = 6.x).
 
 #### Build & Run
 
